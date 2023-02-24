@@ -384,25 +384,12 @@ func (h *handler) handleCallMsg(ctx *callProc, msg *jsonrpcMessage, stream *json
 		h.handleCall(ctx, msg, stream)
 		if h.traceRequests {
 			h.log.Info("Served", "t", time.Since(start), "method", msg.Method, "params", string(msg.Params))
-		} else {
-			h.log.Trace("Served", "t", time.Since(start), "method", msg.Method, "params", string(msg.Params))
 		}
 		return nil
 	case msg.isCall():
 		resp := h.handleCall(ctx, msg, stream)
-		if resp != nil && resp.Error != nil {
-			if resp.Error.Data != nil {
-				h.log.Warn("Served", "method", msg.Method, "reqid", idForLog{msg.ID}, "t", time.Since(start),
-					"err", resp.Error.Message, "errdata", resp.Error.Data)
-			} else {
-				h.log.Warn("Served", "method", msg.Method, "reqid", idForLog{msg.ID}, "t", time.Since(start),
-					"err", resp.Error.Message)
-			}
-		}
 		if h.traceRequests {
 			h.log.Info("Served", "t", time.Since(start), "method", msg.Method, "reqid", idForLog{msg.ID}, "params", string(msg.Params))
-		} else {
-			h.log.Trace("Served", "t", time.Since(start), "method", msg.Method, "reqid", idForLog{msg.ID}, "params", string(msg.Params))
 		}
 		return resp
 	case msg.hasValidID():

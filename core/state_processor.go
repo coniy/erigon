@@ -43,7 +43,7 @@ func applyTransaction(config *chain.Config, engine consensus.EngineReader, gp *G
 	if msg.FeeCap().IsZero() && engine != nil {
 		// Only zero-gas transactions may be service ones
 		syscall := func(contract libcommon.Address, data []byte) ([]byte, error) {
-			return SysCallContract(contract, data, *config, ibs, header, engine, true /* constCall */)
+			return SysCallContract(contract, data, *config, ibs, header, engine, true /* constCall */, nil /*excessDataGas*/)
 		}
 		msg.SetIsFree(engine.IsServiceTransaction(msg.From(), syscall))
 	}
@@ -104,7 +104,7 @@ func ApplyTransaction(config *chain.Config, blockHashFunc func(n uint64) libcomm
 	// about the transaction and calling mechanisms.
 	cfg.SkipAnalysis = SkipAnalysis(config, header.Number.Uint64())
 
-	blockContext := NewEVMBlockContext(header, blockHashFunc, engine, author)
+	blockContext := NewEVMBlockContext(header, blockHashFunc, engine, author, nil /*excessDataGas*/)
 	vmenv := vm.NewEVM(blockContext, evmtypes.TxContext{}, ibs, config, cfg)
 
 	return applyTransaction(config, engine, gp, ibs, stateWriter, header, tx, usedGas, vmenv, cfg)

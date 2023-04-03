@@ -24,16 +24,16 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru"
+	lru2 "github.com/hashicorp/golang-lru/v2"
 	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/ledgerwatch/secp256k1"
-	"go.uber.org/atomic"
 
 	"github.com/ledgerwatch/erigon/accounts/abi"
 	"github.com/ledgerwatch/erigon/common"
@@ -45,7 +45,6 @@ import (
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rlp"
 	"github.com/ledgerwatch/erigon/rpc"
 )
@@ -97,7 +96,7 @@ type EpochTransition struct {
 
 type Step struct {
 	calibrate bool // whether calibration is enabled.
-	inner     *atomic.Uint64
+	inner     atomic.Uint64
 	// Planned durations of steps.
 	durations []StepDurationInfo
 }
@@ -138,7 +137,7 @@ func (s *Step) optCalibrate() bool {
 
 type PermissionedStep struct {
 	inner      *Step
-	canPropose *atomic.Bool
+	canPropose atomic.Bool
 }
 
 type ReceivedStepHashes map[uint64]map[libcommon.Address]libcommon.Hash //BTreeMap<(u64, Address), H256>
@@ -209,7 +208,7 @@ func (e *EpochManager) zoomToAfter(chain consensus.ChainHeaderReader, er consens
 	// forks it will only need to be called for the block directly after
 	// epoch transition, in which case it will be O(1) and require a single
 	// DB lookup.
-	lastTransition, ok := epochTransitionFor2(chain, er, hash)
+	lastTransition, ok := epochTransitionFor(chain, er, hash)
 	if !ok {
 		if lastTransition.BlockNumber > DEBUG_LOG_FROM {
 			fmt.Printf("zoom1: %d\n", lastTransition.BlockNumber)
@@ -255,7 +254,7 @@ func (e *EpochManager) zoomToAfter(chain consensus.ChainHeaderReader, er consens
 // /
 // / The block corresponding the the parent hash must be stored already.
 // nolint
-func epochTransitionFor2(chain consensus.ChainHeaderReader, e consensus.EpochReader, parentHash libcommon.Hash) (transition EpochTransition, ok bool) {
+func epochTransitionFor(chain consensus.ChainHeaderReader, e consensus.EpochReader, parentHash libcommon.Hash) (transition EpochTransition, ok bool) {
 	//TODO: probably this version of func doesn't support non-canonical epoch transitions
 	h := chain.GetHeaderByHash(parentHash)
 	if h == nil {
@@ -269,58 +268,6 @@ func epochTransitionFor2(chain consensus.ChainHeaderReader, e consensus.EpochRea
 		panic("genesis epoch transition must already be set")
 	}
 	return EpochTransition{BlockNumber: num, BlockHash: hash, ProofRlp: transitionProof}, true
-}
-
-// nolint
-func epochTransitionFor(chain consensus.ChainHeaderReader, e consensus.EpochReader, parentHash libcommon.Hash) (transition EpochTransition, ok bool) {
-	// slow path: loop back block by block
-	for {
-		h := chain.GetHeaderByHash(parentHash)
-		if h == nil {
-			return transition, false
-		}
-
-		// look for transition in database.
-		transitionProof, err := e.GetEpoch(h.Hash(), h.Number.Uint64())
-		if err != nil {
-			panic(err)
-		}
-
-		if transitionProof != nil {
-			return EpochTransition{
-				BlockNumber: h.Number.Uint64(),
-				BlockHash:   h.Hash(),
-				ProofRlp:    transitionProof,
-			}, true
-		}
-
-		// canonical hash -> fast breakout:
-		// get the last epoch transition up to this block.
-		//
-		// if `block_hash` is canonical it will only return transitions up to
-		// the parent.
-		canonical := chain.GetHeaderByNumber(h.Number.Uint64())
-		if canonical == nil {
-			return transition, false
-		}
-		//nolint
-		if canonical.Hash() == parentHash {
-			return EpochTransition{
-				BlockNumber: 0,
-				BlockHash:   libcommon.HexToHash("0x5b28c1bfd3a15230c9a46b399cd0f9a6920d432e85381cc6a140b06e8410112f"),
-				ProofRlp:    params.SokolGenesisEpochProof,
-			}, true
-			/* TODO:
-			   return self
-			       .epoch_transitions()
-			       .map(|(_, t)| t)
-			       .take_while(|t| t.block_number <= details.number)
-			       .last();
-			*/
-		}
-
-		parentHash = h.Hash()
-	}
 }
 
 // AuRa
@@ -344,14 +291,14 @@ type AuRa struct {
 }
 
 type GasLimitOverride struct {
-	cache *lru.Cache
+	cache *lru2.Cache[libcommon.Hash, *uint256.Int]
 }
 
 func NewGasLimitOverride() *GasLimitOverride {
 	// The number of recent block hashes for which the gas limit override is memoized.
 	const GasLimitOverrideCacheCapacity = 10
 
-	cache, err := lru.New(GasLimitOverrideCacheCapacity)
+	cache, err := lru2.New[libcommon.Hash, *uint256.Int](GasLimitOverrideCacheCapacity)
 	if err != nil {
 		panic("error creating prefetching cache for blocks")
 	}
@@ -361,9 +308,7 @@ func NewGasLimitOverride() *GasLimitOverride {
 func (pb *GasLimitOverride) Pop(hash libcommon.Hash) *uint256.Int {
 	if val, ok := pb.cache.Get(hash); ok && val != nil {
 		pb.cache.Remove(hash)
-		if v, ok := val.(*uint256.Int); ok {
-			return v
-		}
+		return val
 	}
 	return nil
 }
@@ -420,10 +365,10 @@ func NewAuRa(config *chain.AuRaConfig, db kv.RwDB, ourSigningAddress libcommon.A
 		durations = append(durations, durInfo)
 	}
 	step := &Step{
-		inner:     atomic.NewUint64(initialStep),
 		calibrate: auraParams.StartStep == nil,
 		durations: durations,
 	}
+	step.inner.Store(initialStep)
 	step.doCalibrate()
 
 	/*
@@ -449,12 +394,13 @@ func NewAuRa(config *chain.AuRaConfig, db kv.RwDB, ourSigningAddress libcommon.A
 	c := &AuRa{
 		db:                 db,
 		exitCh:             exitCh,
-		step:               PermissionedStep{inner: step, canPropose: atomic.NewBool(true)},
+		step:               PermissionedStep{inner: step},
 		OurSigningAddress:  ourSigningAddress,
 		cfg:                auraParams,
 		receivedStepHashes: ReceivedStepHashes{},
 		EpochManager:       NewEpochManager(),
 	}
+	c.step.canPropose.Store(true)
 	_ = config
 
 	return c, nil
@@ -856,7 +802,7 @@ func (c *AuRa) Finalize(config *chain.Config, header *types.Header, state *state
 	}
 	if pendingTransitionProof != nil {
 		if header.Number.Uint64() >= DEBUG_LOG_FROM {
-			fmt.Printf("insert_pending_trancition: %d,receipts=%d, lenProof=%d\n", header.Number.Uint64(), len(receipts), len(pendingTransitionProof))
+			fmt.Printf("insert_pending_transition: %d,receipts=%d, lenProof=%d\n", header.Number.Uint64(), len(receipts), len(pendingTransitionProof))
 		}
 		if err = e.PutPendingEpoch(header.Hash(), header.Number.Uint64(), pendingTransitionProof); err != nil {
 			return nil, nil, err
@@ -1405,6 +1351,40 @@ func registrarAbi() abi.ABI {
 		panic(err)
 	}
 	return a
+}
+
+func withdrawalAbi() abi.ABI {
+	a, err := abi.JSON(bytes.NewReader(contracts.Withdrawal))
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+// See https://github.com/gnosischain/specs/blob/master/execution/withdrawals.md
+func (c *AuRa) ExecuteSystemWithdrawals(withdrawals []*types.Withdrawal, syscall consensus.SystemCall) error {
+	if c.cfg.WithdrawalContractAddress == nil {
+		return nil
+	}
+
+	maxFailedWithdrawalsToProcess := big.NewInt(4)
+	amounts := make([]uint64, 0, len(withdrawals))
+	addresses := make([]libcommon.Address, 0, len(withdrawals))
+	for _, w := range withdrawals {
+		amounts = append(amounts, w.Amount)
+		addresses = append(addresses, w.Address)
+	}
+
+	packed, err := withdrawalAbi().Pack("executeSystemWithdrawals", maxFailedWithdrawalsToProcess, amounts, addresses)
+	if err != nil {
+		return err
+	}
+
+	_, err = syscall(*c.cfg.WithdrawalContractAddress, packed)
+	if err != nil {
+		log.Warn("ExecuteSystemWithdrawals", "err", err)
+	}
+	return err
 }
 
 func getCertifier(registrar libcommon.Address, syscall consensus.SystemCall) *libcommon.Address {

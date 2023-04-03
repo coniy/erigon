@@ -66,6 +66,8 @@ func StageMiningExecCfg(
 	payloadId uint64,
 	txPool2 *txpool.TxPool,
 	txPool2DB kv.RoDB,
+	snapshots *snapshotsync.RoSnapshots,
+	transactionsV3 bool,
 ) MiningExecCfg {
 	return MiningExecCfg{
 		db:          db,
@@ -73,7 +75,7 @@ func StageMiningExecCfg(
 		notifier:    notifier,
 		chainConfig: chainConfig,
 		engine:      engine,
-		blockReader: snapshotsync.NewBlockReader(),
+		blockReader: snapshotsync.NewBlockReaderWithSnapshots(snapshots, transactionsV3),
 		vmConfig:    vmConfig,
 		tmpdir:      tmpdir,
 		interrupt:   interrupt,
@@ -97,7 +99,7 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 	stateReader := state.NewPlainStateReader(tx)
 	ibs := state.New(stateReader)
 	stateWriter := state.NewPlainStateWriter(tx, tx, current.Header.Number.Uint64())
-	if cfg.chainConfig.DAOForkSupport && cfg.chainConfig.DAOForkBlock != nil && cfg.chainConfig.DAOForkBlock.Cmp(current.Header.Number) == 0 {
+	if cfg.chainConfig.DAOForkBlock != nil && cfg.chainConfig.DAOForkBlock.Cmp(current.Header.Number) == 0 {
 		misc.ApplyDAOHardFork(ibs)
 	}
 	systemcontracts.UpgradeBuildInSystemContract(&cfg.chainConfig, current.Header.Number, ibs)
@@ -171,7 +173,7 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 
 	var err error
 	_, current.Txs, current.Receipts, err = core.FinalizeBlockExecution(cfg.engine, stateReader, current.Header, current.Txs, current.Uncles, stateWriter,
-		&cfg.chainConfig, ibs, current.Receipts, current.Withdrawals, EpochReaderImpl{tx: tx}, ChainReaderImpl{config: &cfg.chainConfig, tx: tx, blockReader: cfg.blockReader}, true)
+		&cfg.chainConfig, ibs, current.Receipts, current.Withdrawals, EpochReaderImpl{tx: tx}, ChainReaderImpl{config: &cfg.chainConfig, tx: tx, blockReader: cfg.blockReader}, true, nil /*excessDataGas*/)
 	if err != nil {
 		return err
 	}

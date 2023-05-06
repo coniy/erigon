@@ -62,7 +62,7 @@ func (n BlockNonce) Uint64() uint64 {
 
 // MarshalText encodes n as a hex string with 0x prefix.
 func (n BlockNonce) MarshalText() ([]byte, error) {
-	return hexutil.Bytes(n[:]).MarshalText()
+	return hexutility.Bytes(n[:]).MarshalText()
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
@@ -109,7 +109,7 @@ type Header struct {
 // returns nil if the parent header could not be fetched, or if the parent block's excess data gas
 // is nil.
 func (h *Header) ParentExcessDataGas(getHeader func(hash libcommon.Hash, number uint64) *Header) *big.Int {
-	p := getHeader(h.ParentHash, h.Number.Uint64())
+	p := getHeader(h.ParentHash, h.Number.Uint64()-1)
 	if p != nil {
 		return p.ExcessDataGas
 	}
@@ -506,7 +506,7 @@ type headerMarshaling struct {
 	GasLimit      hexutil.Uint64
 	GasUsed       hexutil.Uint64
 	Time          hexutil.Uint64
-	Extra         hexutil.Bytes
+	Extra         hexutility.Bytes
 	BaseFee       *hexutil.Big
 	ExcessDataGas *hexutil.Big
 	Hash          libcommon.Hash `json:"hash"` // adds call to Hash() in MarshalJSON

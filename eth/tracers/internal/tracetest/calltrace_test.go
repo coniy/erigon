@@ -28,7 +28,10 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/kv/memdb"
+	"github.com/ledgerwatch/erigon-lib/common/hexutility"
+	"github.com/ledgerwatch/erigon/turbo/stages"
+	"github.com/stretchr/testify/require"
+
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/common/math"
@@ -59,7 +62,7 @@ type callContext struct {
 type callLog struct {
 	Address libcommon.Address `json:"address"`
 	Topics  []libcommon.Hash  `json:"topics"`
-	Data    hexutil.Bytes     `json:"data"`
+	Data    hexutility.Bytes  `json:"data"`
 }
 
 // callTrace is the result of a callTracer run.
@@ -68,8 +71,8 @@ type callTrace struct {
 	Gas      *hexutil.Uint64   `json:"gas"`
 	GasUsed  *hexutil.Uint64   `json:"gasUsed"`
 	To       libcommon.Address `json:"to,omitempty"`
-	Input    hexutil.Bytes     `json:"input"`
-	Output   hexutil.Bytes     `json:"output,omitempty"`
+	Input    hexutility.Bytes  `json:"input"`
+	Output   hexutility.Bytes  `json:"output,omitempty"`
 	Error    string            `json:"error,omitempty"`
 	Revertal string            `json:"revertReason,omitempty"`
 	Calls    []callTrace       `json:"calls,omitempty"`
@@ -146,10 +149,13 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 					Difficulty:  (*big.Int)(test.Context.Difficulty),
 					GasLimit:    uint64(test.Context.GasLimit),
 				}
-				_, dbTx    = memdb.NewTestTx(t)
-				rules      = test.Genesis.Config.Rules(context.BlockNumber, context.Time)
-				statedb, _ = tests.MakePreState(rules, dbTx, test.Genesis.Alloc, uint64(test.Context.Number))
+				rules = test.Genesis.Config.Rules(context.BlockNumber, context.Time)
 			)
+			m := stages.Mock(t)
+			dbTx, err := m.DB.BeginRw(m.Ctx)
+			require.NoError(t, err)
+			defer dbTx.Rollback()
+			statedb, _ := tests.MakePreState(rules, dbTx, test.Genesis.Alloc, uint64(test.Context.Number))
 			if test.Genesis.BaseFee != nil {
 				context.BaseFee, _ = uint256.FromBig(test.Genesis.BaseFee)
 			}
@@ -162,7 +168,7 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to prepare transaction for tracing: %v", err)
 			}
-			vmRet, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(tx.GetGas()), true /* refunds */, false /* gasBailout */)
+			vmRet, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(tx.GetGas()).AddDataGas(tx.GetDataGas()), true /* refunds */, false /* gasBailout */)
 			if err != nil {
 				t.Fatalf("failed to execute transaction: %v", err)
 			}
@@ -252,7 +258,10 @@ func benchTracer(b *testing.B, tracerName string, test *callTracerTest) {
 		Difficulty:  (*big.Int)(test.Context.Difficulty),
 		GasLimit:    uint64(test.Context.GasLimit),
 	}
-	_, dbTx := memdb.NewTestTx(b)
+	m := stages.Mock(b)
+	dbTx, err := m.DB.BeginRw(m.Ctx)
+	require.NoError(b, err)
+	defer dbTx.Rollback()
 	statedb, _ := tests.MakePreState(rules, dbTx, test.Genesis.Alloc, uint64(test.Context.Number))
 
 	b.ReportAllocs()
@@ -264,7 +273,7 @@ func benchTracer(b *testing.B, tracerName string, test *callTracerTest) {
 		}
 		evm := vm.NewEVM(context, txContext, statedb, test.Genesis.Config, vm.Config{Debug: true, Tracer: tracer})
 		snap := statedb.Snapshot()
-		st := core.NewStateTransition(evm, msg, new(core.GasPool).AddGas(tx.GetGas()))
+		st := core.NewStateTransition(evm, msg, new(core.GasPool).AddGas(tx.GetGas()).AddDataGas(tx.GetDataGas()))
 		if _, err = st.TransitionDb(true /* refunds */, false /* gasBailout */); err != nil {
 			b.Fatalf("failed to execute transaction: %v", err)
 		}
@@ -325,7 +334,11 @@ func TestZeroValueToNotExitCall(t *testing.T) {
 		},
 	}
 	rules := params.MainnetChainConfig.Rules(context.BlockNumber, context.Time)
-	_, dbTx := memdb.NewTestTx(t)
+	m := stages.Mock(t)
+	dbTx, err := m.DB.BeginRw(m.Ctx)
+	require.NoError(t, err)
+	defer dbTx.Rollback()
+
 	statedb, _ := tests.MakePreState(rules, dbTx, alloc, context.BlockNumber)
 	// Create the tracer, the EVM environment and run it
 	tracer, err := tracers.New("callTracer", nil, nil)
@@ -337,7 +350,7 @@ func TestZeroValueToNotExitCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to prepare transaction for tracing: %v", err)
 	}
-	st := core.NewStateTransition(evm, msg, new(core.GasPool).AddGas(tx.GetGas()))
+	st := core.NewStateTransition(evm, msg, new(core.GasPool).AddGas(tx.GetGas()).AddDataGas(tx.GetDataGas()))
 	if _, err = st.TransitionDb(true /* refunds */, false /* gasBailout */); err != nil {
 		t.Fatalf("failed to execute transaction: %v", err)
 	}

@@ -153,7 +153,9 @@ func (b *BeaconBody) EncodeSSZ(dst []byte) ([]byte, error) {
 	offset += uint32(len(b.VoluntaryExits)) * 112
 	// Encode Sync Aggregate
 	if b.Version >= clparams.AltairVersion {
-		buf = b.SyncAggregate.EncodeSSZ(buf)
+		if buf, err = b.SyncAggregate.EncodeSSZ(buf); err != nil {
+			return nil, err
+		}
 	}
 	if b.Version >= clparams.BellatrixVersion {
 		buf = append(buf, ssz.OffsetSSZ(offset)...)
@@ -202,7 +204,9 @@ func (b *BeaconBody) EncodeSSZ(dst []byte) ([]byte, error) {
 	}
 
 	for _, exit := range b.VoluntaryExits {
-		buf = exit.EncodeSSZ(buf)
+		if buf, err = exit.EncodeSSZ(buf); err != nil {
+			return nil, err
+		}
 	}
 
 	if b.Version >= clparams.BellatrixVersion {
@@ -255,11 +259,7 @@ func (b *BeaconBody) EncodingSizeSSZ() (size int) {
 	return
 }
 
-func (b *BeaconBody) DecodeSSZ(buf []byte) error {
-	panic("yo")
-}
-
-func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
+func (b *BeaconBody) DecodeSSZ(buf []byte, version int) error {
 	b.Version = clparams.StateVersion(version)
 	var err error
 
@@ -271,7 +271,7 @@ func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
 	copy(b.RandaoReveal[:], buf)
 	// Decode ethereum 1 data.
 	b.Eth1Data = new(Eth1Data)
-	if err := b.Eth1Data.DecodeSSZ(buf[96:168]); err != nil {
+	if err := b.Eth1Data.DecodeSSZ(buf[96:168], version); err != nil {
 		return err
 	}
 	// Decode graffiti.
@@ -289,7 +289,7 @@ func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
 			return ssz.ErrLowBufferSize
 		}
 		b.SyncAggregate = new(SyncAggregate)
-		if err := b.SyncAggregate.DecodeSSZ(buf[220:380]); err != nil {
+		if err := b.SyncAggregate.DecodeSSZ(buf[220:380], version); err != nil {
 			return err
 		}
 	}
@@ -306,23 +306,23 @@ func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
 	}
 	// Decode Proposer slashings
 	proposerSlashingLength := 416
-	b.ProposerSlashings, err = ssz.DecodeStaticList[*ProposerSlashing](buf, offSetProposerSlashings, offsetAttesterSlashings, uint32(proposerSlashingLength), MaxProposerSlashings)
+	b.ProposerSlashings, err = ssz.DecodeStaticList[*ProposerSlashing](buf, offSetProposerSlashings, offsetAttesterSlashings, uint32(proposerSlashingLength), MaxProposerSlashings, version)
 	if err != nil {
 		return err
 	}
 	// Decode attester slashings
-	b.AttesterSlashings, err = ssz.DecodeDynamicList[*AttesterSlashing](buf, offsetAttesterSlashings, offsetAttestations, MaxAttesterSlashings)
+	b.AttesterSlashings, err = ssz.DecodeDynamicList[*AttesterSlashing](buf, offsetAttesterSlashings, offsetAttestations, MaxAttesterSlashings, version)
 	if err != nil {
 		return err
 	}
 	// Decode attestations
-	b.Attestations, err = ssz.DecodeDynamicList[*Attestation](buf, offsetAttestations, offsetDeposits, MaxAttestations)
+	b.Attestations, err = ssz.DecodeDynamicList[*Attestation](buf, offsetAttestations, offsetDeposits, MaxAttestations, version)
 	if err != nil {
 		return err
 	}
 	// Decode deposits
 	depositsLength := 1240
-	b.Deposits, err = ssz.DecodeStaticList[*Deposit](buf, offsetDeposits, offsetExits, uint32(depositsLength), MaxDeposits)
+	b.Deposits, err = ssz.DecodeStaticList[*Deposit](buf, offsetDeposits, offsetExits, uint32(depositsLength), MaxDeposits, version)
 	if err != nil {
 		return err
 	}
@@ -332,7 +332,7 @@ func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
 	if b.Version >= clparams.BellatrixVersion {
 		endOffset = int(offsetExecution)
 	}
-	b.VoluntaryExits, err = ssz.DecodeStaticList[*SignedVoluntaryExit](buf, offsetExits, uint32(endOffset), uint32(exitLength), MaxVoluntaryExits)
+	b.VoluntaryExits, err = ssz.DecodeStaticList[*SignedVoluntaryExit](buf, offsetExits, uint32(endOffset), uint32(exitLength), MaxVoluntaryExits, version)
 	if err != nil {
 		return err
 	}
@@ -346,13 +346,13 @@ func (b *BeaconBody) DecodeSSZWithVersion(buf []byte, version int) error {
 		if offsetExecution > uint32(endOffset) || len(buf) < endOffset {
 			return ssz.ErrBadOffset
 		}
-		if err := b.ExecutionPayload.DecodeSSZWithVersion(buf[offsetExecution:endOffset], int(b.Version)); err != nil {
+		if err := b.ExecutionPayload.DecodeSSZ(buf[offsetExecution:endOffset], int(b.Version)); err != nil {
 			return err
 		}
 	}
 
 	if b.Version >= clparams.CapellaVersion {
-		if b.ExecutionChanges, err = ssz.DecodeStaticList[*SignedBLSToExecutionChange](buf, blsChangesOffset, uint32(len(buf)), 172, MaxExecutionChanges); err != nil {
+		if b.ExecutionChanges, err = ssz.DecodeStaticList[*SignedBLSToExecutionChange](buf, blsChangesOffset, uint32(len(buf)), 172, MaxExecutionChanges, version); err != nil {
 			return err
 		}
 
@@ -459,7 +459,7 @@ func (b *BeaconBlock) EncodingSizeSSZ() int {
 	return 80 + b.Body.EncodingSizeSSZ()
 }
 
-func (b *BeaconBlock) DecodeSSZWithVersion(buf []byte, version int) error {
+func (b *BeaconBlock) DecodeSSZ(buf []byte, version int) error {
 	if len(buf) < b.EncodingSizeSSZ() {
 		return ssz.ErrLowBufferSize
 	}
@@ -468,7 +468,7 @@ func (b *BeaconBlock) DecodeSSZWithVersion(buf []byte, version int) error {
 	copy(b.ParentRoot[:], buf[16:])
 	copy(b.StateRoot[:], buf[48:])
 	b.Body = new(BeaconBody)
-	return b.Body.DecodeSSZWithVersion(buf[84:], version)
+	return b.Body.DecodeSSZ(buf[84:], version)
 }
 
 func (b *BeaconBlock) HashSSZ() ([32]byte, error) {
@@ -485,9 +485,6 @@ func (b *BeaconBlock) HashSSZ() ([32]byte, error) {
 	}, 8)
 }
 
-func (*BeaconBlock) DecodeSSZ(buf []byte) error {
-	panic("A")
-}
 func (b *SignedBeaconBlock) EncodeSSZ(buf []byte) ([]byte, error) {
 	dst := buf
 	var err error
@@ -507,16 +504,12 @@ func (b *SignedBeaconBlock) EncodingSizeSSZ() int {
 	return 100 + b.Block.EncodingSizeSSZ()
 }
 
-func (b *SignedBeaconBlock) DecodeSSZ(buf []byte) error {
-	return b.DecodeSSZWithVersion(buf, int(clparams.BellatrixVersion))
-}
-
-func (b *SignedBeaconBlock) DecodeSSZWithVersion(buf []byte, s int) error {
+func (b *SignedBeaconBlock) DecodeSSZ(buf []byte, s int) error {
 	if len(buf) < b.EncodingSizeSSZ() {
 		return ssz.ErrLowBufferSize
 	}
 	copy(b.Signature[:], buf[4:100])
-	return b.Block.DecodeSSZWithVersion(buf[100:], s)
+	return b.Block.DecodeSSZ(buf[100:], s)
 }
 
 func (b *SignedBeaconBlock) HashSSZ() ([32]byte, error) {

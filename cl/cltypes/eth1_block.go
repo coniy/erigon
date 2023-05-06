@@ -127,13 +127,8 @@ func (b *Eth1Block) EncodingSizeSSZ() (size int) {
 	return
 }
 
-// Need a version
-func (b *Eth1Block) DecodeSSZ(buf []byte) error {
-	panic("stop")
-}
-
-// DecodeSSZWithVersion decodes the block in SSZ format.
-func (b *Eth1Block) DecodeSSZWithVersion(buf []byte, version int) error {
+// DecodeSSZ decodes the block in SSZ format.
+func (b *Eth1Block) DecodeSSZ(buf []byte, version int) error {
 	b.version = clparams.StateVersion(version)
 	if len(buf) < b.EncodingSizeSSZ() {
 		return ssz.ErrLowBufferSize
@@ -222,7 +217,7 @@ func (b *Eth1Block) DecodeSSZWithVersion(buf []byte, version int) error {
 	// If withdrawals are enabled, process them.
 	if withdrawalOffset != nil {
 		var err error
-		b.Withdrawals, err = ssz.DecodeStaticList[*types.Withdrawal](buf, *withdrawalOffset, uint32(len(buf)), 44, 16)
+		b.Withdrawals, err = ssz.DecodeStaticList[*types.Withdrawal](buf, *withdrawalOffset, uint32(len(buf)), 44, 16, version)
 		if err != nil {
 			return err
 		}
@@ -297,7 +292,7 @@ func (b *Eth1Block) HashSSZ(version clparams.StateVersion) ([32]byte, error) {
 // RlpHeader returns the equivalent types.Header struct with RLP-based fields.
 func (b *Eth1Block) RlpHeader() (*types.Header, error) {
 	// Reverse the order of the bytes in the BaseFeePerGas array and convert it to a big integer.
-	reversedBaseFeePerGas := b.BaseFeePerGas[:]
+	reversedBaseFeePerGas := libcommon.Copy(b.BaseFeePerGas[:])
 	for i, j := 0, len(reversedBaseFeePerGas)-1; i < j; i, j = i+1, j-1 {
 		reversedBaseFeePerGas[i], reversedBaseFeePerGas[j] = reversedBaseFeePerGas[j], reversedBaseFeePerGas[i]
 	}

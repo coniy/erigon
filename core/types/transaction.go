@@ -36,6 +36,7 @@ import (
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/crypto"
+	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rlp"
 )
 
@@ -51,7 +52,7 @@ const (
 	LegacyTxType = iota
 	AccessListTxType
 	DynamicFeeTxType
-	BlobTxType = 5
+	BlobTxType
 )
 
 // Transaction is an Ethereum transaction.
@@ -66,6 +67,7 @@ type Transaction interface {
 	Cost() *uint256.Int
 	GetDataHashes() []libcommon.Hash
 	GetGas() uint64
+	GetDataGas() uint64
 	GetValue() *uint256.Int
 	Time() time.Time
 	GetTo() *libcommon.Address
@@ -92,6 +94,7 @@ type Transaction interface {
 	GetSender() (libcommon.Address, bool)
 	SetSender(libcommon.Address)
 	IsContractDeploy() bool
+	Unwrap() Transaction // If this is a network wrapper, returns the unwrapped tx. Otherwiwes returns itself.
 }
 
 // TransactionMisc is collection of miscelaneous fields for transaction that is supposed to be embedded into concrete
@@ -472,7 +475,7 @@ type Message struct {
 	dataHashes       []libcommon.Hash
 }
 
-func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amount *uint256.Int, gasLimit uint64, gasPrice *uint256.Int, feeCap, tip *uint256.Int, data []byte, accessList types2.AccessList, checkNonce bool, isFree bool) Message {
+func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amount *uint256.Int, gasLimit uint64, gasPrice *uint256.Int, feeCap, tip *uint256.Int, data []byte, accessList types2.AccessList, checkNonce bool, isFree bool, maxFeePerDataGas *uint256.Int) Message {
 	m := Message{
 		from:       from,
 		to:         to,
@@ -492,6 +495,9 @@ func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amo
 	}
 	if feeCap != nil {
 		m.feeCap.Set(feeCap)
+	}
+	if maxFeePerDataGas != nil {
+		m.maxFeePerDataGas.Set(maxFeePerDataGas)
 	}
 	return m
 }
@@ -529,6 +535,11 @@ func (m *Message) ChangeGas(globalGasCap, desiredGas uint64) {
 	}
 
 	m.gasLimit = gas
+}
+
+func (m Message) DataGas() uint64 { return params.DataGasPerBlob * uint64(len(m.dataHashes)) }
+func (m Message) MaxFeePerDataGas() *uint256.Int {
+	return &m.maxFeePerDataGas
 }
 
 func (m Message) DataHashes() []libcommon.Hash { return m.dataHashes }

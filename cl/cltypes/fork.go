@@ -29,7 +29,7 @@ func (f *Fork) EncodeSSZ(dst []byte) ([]byte, error) {
 	return buf, nil
 }
 
-func (f *Fork) DecodeSSZ(buf []byte) error {
+func (f *Fork) DecodeSSZ(buf []byte, _ int) error {
 	if len(buf) < f.EncodingSizeSSZ() {
 		return ssz.ErrLowBufferSize
 	}

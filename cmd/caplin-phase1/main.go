@@ -18,6 +18,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ledgerwatch/erigon/cl/phase1/core"
+	"github.com/ledgerwatch/erigon/cl/phase1/execution_client"
+
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/remote"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/urfave/cli/v2"
@@ -26,13 +29,12 @@ import (
 	"github.com/ledgerwatch/erigon/cl/cltypes"
 	"github.com/ledgerwatch/erigon/cl/fork"
 	"github.com/ledgerwatch/erigon/cmd/caplin-phase1/caplin1"
-	"github.com/ledgerwatch/erigon/cmd/erigon-cl/core"
-	"github.com/ledgerwatch/erigon/cmd/erigon-cl/execution_client"
 	lcCli "github.com/ledgerwatch/erigon/cmd/sentinel/cli"
 	"github.com/ledgerwatch/erigon/cmd/sentinel/cli/flags"
 	"github.com/ledgerwatch/erigon/cmd/sentinel/sentinel"
 	"github.com/ledgerwatch/erigon/cmd/sentinel/sentinel/service"
 	lightclientapp "github.com/ledgerwatch/erigon/turbo/app"
+	"github.com/ledgerwatch/erigon/turbo/debug"
 )
 
 func main() {
@@ -51,6 +53,9 @@ func runCaplinNode(cliCtx *cli.Context) error {
 	cfg, err := lcCli.SetupConsensusClientCfg(cliCtx)
 	if err != nil {
 		log.Error("[Phase1] Could not initialize caplin", "err", err)
+	}
+	if _, err := debug.Setup(cliCtx, true /* root logger */); err != nil {
+		return err
 	}
 	log.Root().SetHandler(log.LvlFilterHandler(log.Lvl(cfg.LogLvl), log.StderrHandler))
 	log.Info("[Phase1]", "chain", cliCtx.String(flags.Chain.Name))
@@ -75,10 +80,10 @@ func runCaplinNode(cliCtx *cli.Context) error {
 		NoDiscovery:   cfg.NoDiscovery,
 	}, nil, &service.ServerConfig{Network: cfg.ServerProtocol, Addr: cfg.ServerAddr}, nil, &cltypes.Status{
 		ForkDigest:     forkDigest,
-		FinalizedRoot:  state.FinalizedCheckpoint().Root,
-		FinalizedEpoch: state.FinalizedCheckpoint().Epoch,
-		HeadSlot:       state.FinalizedCheckpoint().Epoch * cfg.BeaconCfg.SlotsPerEpoch,
-		HeadRoot:       state.FinalizedCheckpoint().Root,
+		FinalizedRoot:  state.FinalizedCheckpoint().BlockRoot(),
+		FinalizedEpoch: state.FinalizedCheckpoint().Epoch(),
+		HeadSlot:       state.FinalizedCheckpoint().Epoch() * cfg.BeaconCfg.SlotsPerEpoch,
+		HeadRoot:       state.FinalizedCheckpoint().BlockRoot(),
 	})
 	if err != nil {
 		log.Error("Could not start sentinel", "err", err)

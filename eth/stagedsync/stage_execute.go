@@ -23,6 +23,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv/temporal/historyv2"
 	libstate "github.com/ledgerwatch/erigon-lib/state"
 	"github.com/ledgerwatch/log/v3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ledgerwatch/erigon/common/changeset"
 	"github.com/ledgerwatch/erigon/common/dbutils"
@@ -237,7 +238,7 @@ func newStateReaderWriter(
 
 // ================ Erigon3 ================
 
-func ExecBlockV3(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool) (err error) {
+func ExecBlockV3(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool, logger log.Logger) (err error) {
 	workersCount := cfg.syncCfg.ExecWorkerCount
 	//workersCount := 2
 	if !initialCycle {
@@ -276,7 +277,7 @@ func ExecBlockV3(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint64, ctx cont
 		return nil
 	}
 	if to > s.BlockNumber+16 {
-		log.Info(fmt.Sprintf("[%s] Blocks execution", logPrefix), "from", s.BlockNumber, "to", to)
+		logger.Info(fmt.Sprintf("[%s] Blocks execution", logPrefix), "from", s.BlockNumber, "to", to)
 	}
 	parallel := initialCycle && tx == nil
 	if err := ExecV3(ctx, s, u, workersCount, cfg, tx, parallel, logPrefix,
@@ -356,9 +357,9 @@ func senderStageProgress(tx kv.Tx, db kv.RoDB) (prevStageProgress uint64, err er
 
 // ================ Erigon3 End ================
 
-func SpawnExecuteBlocksStage(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool, quiet bool) (err error) {
+func SpawnExecuteBlocksStage(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool, logger log.Logger) (err error) {
 	if cfg.historyV3 {
-		if err = ExecBlockV3(s, u, tx, toBlock, ctx, cfg, initialCycle); err != nil {
+		if err = ExecBlockV3(s, u, tx, toBlock, ctx, cfg, initialCycle, logger); err != nil {
 			return err
 		}
 		return nil
@@ -392,8 +393,8 @@ func SpawnExecuteBlocksStage(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint
 	if to <= s.BlockNumber {
 		return nil
 	}
-	if !quiet && to > s.BlockNumber+16 {
-		log.Info(fmt.Sprintf("[%s] Blocks execution", logPrefix), "from", s.BlockNumber, "to", to)
+	if to > s.BlockNumber+16 {
+		logger.Info(fmt.Sprintf("[%s] Blocks execution", logPrefix), "from", s.BlockNumber, "to", to)
 	}
 	stateStream := !initialCycle && cfg.stateStream && to-s.BlockNumber < stateStreamLimit
 
@@ -419,10 +420,26 @@ func SpawnExecuteBlocksStage(s *StageState, u Unwinder, tx kv.RwTx, toBlock uint
 		batch.Rollback()
 	}()
 
+	var readAhead chan uint64
+	if initialCycle {
+		// snapshots are often stored on chaper drives. don't expect low-read-latency and manually read-ahead.
+		// can't use OS-level ReadAhead - because Data >> RAM
+		// it also warmsup state a bit - by touching senders/coninbase accounts and code
+		var clean func()
+		readAhead, clean = blocksReadAhead(ctx, &cfg, 4)
+		defer clean()
+	}
+
 Loop:
 	for blockNum := stageProgress + 1; blockNum <= to; blockNum++ {
 		if stoppedErr = common.Stopped(quit); stoppedErr != nil {
 			break
+		}
+		if initialCycle {
+			select {
+			case readAhead <- blockNum:
+			default:
+			}
 		}
 
 		blockHash, err := rawdb.ReadCanonicalHash(tx, blockNum)
@@ -434,7 +451,7 @@ Loop:
 			return err
 		}
 		if block == nil {
-			log.Error(fmt.Sprintf("[%s] Empty block", logPrefix), "blocknum", blockNum)
+			logger.Error(fmt.Sprintf("[%s] Empty block", logPrefix), "blocknum", blockNum)
 			break
 		}
 
@@ -446,7 +463,7 @@ Loop:
 		writeCallTraces := nextStagesExpectData || blockNum > cfg.prune.CallTraces.PruneTo(to)
 		if err = executeBlock(block, tx, batch, cfg, *cfg.vmConfig, writeChangeSets, writeReceipts, writeCallTraces, initialCycle, stateStream); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				log.Warn(fmt.Sprintf("[%s] Execution failed", logPrefix), "block", blockNum, "hash", block.Hash().String(), "err", err)
+				logger.Warn(fmt.Sprintf("[%s] Execution failed", logPrefix), "block", blockNum, "hash", block.Hash().String(), "err", err)
 				if cfg.hd != nil {
 					cfg.hd.ReportBadHeaderPoS(blockHash, block.ParentHash())
 				}
@@ -461,7 +478,7 @@ Loop:
 
 		shouldUpdateProgress := batch.BatchSize() >= int(cfg.batchSize)
 		if shouldUpdateProgress {
-			log.Info("Committed State", "gas reached", currentStateGas, "gasTarget", gasState)
+			logger.Info("Committed State", "gas reached", currentStateGas, "gasTarget", gasState)
 			currentStateGas = 0
 			if err = batch.Commit(); err != nil {
 				return err
@@ -488,7 +505,7 @@ Loop:
 		select {
 		default:
 		case <-logEvery.C:
-			logBlock, logTx, logTime = logProgress(logPrefix, logBlock, logTime, blockNum, logTx, lastLogTx, gas, float64(currentStateGas)/float64(gasState), batch)
+			logBlock, logTx, logTime = logProgress(logPrefix, logBlock, logTime, blockNum, logTx, lastLogTx, gas, float64(currentStateGas)/float64(gasState), batch, logger)
 			gas = 0
 			tx.CollectMetrics()
 			syncMetrics[stages.Execution].Set(blockNum)
@@ -513,13 +530,99 @@ Loop:
 		}
 	}
 
-	if !quiet {
-		log.Info(fmt.Sprintf("[%s] Completed on", logPrefix), "block", stageProgress)
-	}
+	logger.Info(fmt.Sprintf("[%s] Completed on", logPrefix), "block", stageProgress)
 	return stoppedErr
 }
 
-func logProgress(logPrefix string, prevBlock uint64, prevTime time.Time, currentBlock uint64, prevTx, currentTx uint64, gas uint64, gasState float64, batch ethdb.DbWithPendingMutations) (uint64, uint64, time.Time) {
+func blocksReadAhead(ctx context.Context, cfg *ExecuteBlockCfg, workers int) (chan uint64, context.CancelFunc) {
+	const readAheadBlocks = 100
+	readAhead := make(chan uint64, readAheadBlocks)
+	g, gCtx := errgroup.WithContext(ctx)
+	for workerNum := 0; workerNum < workers; workerNum++ {
+		g.Go(func() (err error) {
+			var bn uint64
+			var ok bool
+			var tx kv.Tx
+			defer func() {
+				if tx != nil {
+					tx.Rollback()
+				}
+			}()
+
+			for i := 0; ; i++ {
+				select {
+				case bn, ok = <-readAhead:
+					if !ok {
+						return
+					}
+				case <-gCtx.Done():
+					return gCtx.Err()
+				}
+
+				if i%100 == 0 {
+					if tx != nil {
+						tx.Rollback()
+					}
+					tx, err = cfg.db.BeginRo(ctx)
+					if err != nil {
+						return err
+					}
+				}
+
+				if err := blocksReadAheadFunc(gCtx, tx, cfg, bn+readAheadBlocks); err != nil {
+					return err
+				}
+			}
+		})
+	}
+	return readAhead, func() {
+		close(readAhead)
+		_ = g.Wait()
+	}
+}
+func blocksReadAheadFunc(ctx context.Context, tx kv.Tx, cfg *ExecuteBlockCfg, blockNum uint64) error {
+	blockHash, err := rawdb.ReadCanonicalHash(tx, blockNum)
+	if err != nil {
+		return err
+	}
+	block, senders, err := cfg.blockReader.BlockWithSenders(ctx, tx, blockHash, blockNum)
+	if err != nil {
+		return err
+	}
+	if block == nil {
+		return nil
+	}
+	stateReader := state.NewPlainStateReader(tx) //TODO: can do on batch! if make batch thread-safe
+	for _, sender := range senders {
+		a, _ := stateReader.ReadAccountData(sender)
+		if a == nil || a.Incarnation == 0 {
+			continue
+		}
+		if code, _ := stateReader.ReadAccountCode(sender, a.Incarnation, a.CodeHash); len(code) > 0 {
+			_, _ = code[0], code[len(code)-1]
+		}
+	}
+
+	for _, txn := range block.Transactions() {
+		to := txn.GetTo()
+		if to == nil {
+			continue
+		}
+		a, _ := stateReader.ReadAccountData(*to)
+		if a == nil || a.Incarnation == 0 {
+			continue
+		}
+		if code, _ := stateReader.ReadAccountCode(*to, a.Incarnation, a.CodeHash); len(code) > 0 {
+			_, _ = code[0], code[len(code)-1]
+		}
+	}
+	_, _ = stateReader.ReadAccountData(block.Coinbase())
+	_, _ = block, senders
+	return nil
+}
+
+func logProgress(logPrefix string, prevBlock uint64, prevTime time.Time, currentBlock uint64, prevTx, currentTx uint64, gas uint64,
+	gasState float64, batch ethdb.DbWithPendingMutations, logger log.Logger) (uint64, uint64, time.Time) {
 	currentTime := time.Now()
 	interval := currentTime.Sub(prevTime)
 	speed := float64(currentBlock-prevBlock) / (float64(interval) / float64(time.Second))
@@ -539,7 +642,7 @@ func logProgress(logPrefix string, prevBlock uint64, prevTime time.Time, current
 		logpairs = append(logpairs, "batch", common.ByteCount(uint64(batch.BatchSize())))
 	}
 	logpairs = append(logpairs, "alloc", common.ByteCount(m.Alloc), "sys", common.ByteCount(m.Sys))
-	log.Info(fmt.Sprintf("[%s] Executed blocks", logPrefix), logpairs...)
+	logger.Info(fmt.Sprintf("[%s] Executed blocks", logPrefix), logpairs...)
 
 	return currentBlock, currentTx, currentTime
 }

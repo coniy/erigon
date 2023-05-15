@@ -40,7 +40,7 @@ import (
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/eth/ethconsensusconfig"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/turbo/logging"
+	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/erigon/turbo/services"
 	"github.com/ledgerwatch/erigon/turbo/snapshotsync"
 )
@@ -81,8 +81,13 @@ var erigon4Cmd = &cobra.Command{
 	Use:   "erigon4",
 	Short: "Experimental command to re-execute blocks from beginning using erigon2 state representation and history/domain",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		logging.SetupLoggerCmd("erigon4", cmd)
-		return Erigon4(genesis, chainConfig, log.Root())
+		var logger log.Logger
+		var err error
+		if logger, err = debug.SetupCobra(cmd, "erigon4"); err != nil {
+			logger.Error("Setting up", "error", err)
+			return err
+		}
+		return Erigon4(genesis, chainConfig, logger)
 	},
 }
 
@@ -235,7 +240,7 @@ func Erigon4(genesis *types.Genesis, chainConfig *chain2.Config, logger log.Logg
 	//transactionsV3 := kvcfg.TransactionsV3.FromDB(db)
 	transactionsV3 := false
 	blockReader = snapshotsync.NewBlockReaderWithSnapshots(allSnapshots, transactionsV3)
-	engine := initConsensusEngine(chainConfig, allSnapshots)
+	engine := initConsensusEngine(chainConfig, allSnapshots, logger)
 
 	getHeader := func(hash libcommon.Hash, number uint64) *types.Header {
 		h, err := blockReader.Header(ctx, historyTx, hash, number)
@@ -597,7 +602,7 @@ func (ww *StateWriterV4) CreateContract(address libcommon.Address) error {
 	return nil
 }
 
-func initConsensusEngine(cc *chain2.Config, snapshots *snapshotsync.RoSnapshots) (engine consensus.Engine) {
+func initConsensusEngine(cc *chain2.Config, snapshots *snapshotsync.RoSnapshots, logger log.Logger) (engine consensus.Engine) {
 	config := ethconfig.Defaults
 
 	var consensusConfig interface{}
@@ -611,5 +616,6 @@ func initConsensusEngine(cc *chain2.Config, snapshots *snapshotsync.RoSnapshots)
 	} else {
 		consensusConfig = &config.Ethash
 	}
-	return ethconsensusconfig.CreateConsensusEngine(cc, consensusConfig, config.Miner.Notify, config.Miner.Noverify, config.HeimdallgRPCAddress, config.HeimdallURL, config.WithoutHeimdall, datadirCli, snapshots, true /* readonly */)
+	return ethconsensusconfig.CreateConsensusEngine(cc, consensusConfig, config.Miner.Notify, config.Miner.Noverify, config.HeimdallgRPCAddress,
+		config.HeimdallURL, config.WithoutHeimdall, datadirCli, true /* readonly */, logger)
 }

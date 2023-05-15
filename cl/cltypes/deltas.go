@@ -3,8 +3,8 @@ package cltypes
 import (
 	"fmt"
 
-	"github.com/ledgerwatch/erigon/cl/cltypes/clonable"
-	"github.com/ledgerwatch/erigon/cl/cltypes/ssz"
+	"github.com/ledgerwatch/erigon-lib/types/clonable"
+	"github.com/ledgerwatch/erigon-lib/types/ssz"
 )
 
 // Deltas data, for https://github.com/ethereum/consensus-specs/tree/master/tests/formats/rewards
@@ -28,7 +28,7 @@ func (f *Deltas) EncodeSSZ(dst []byte) ([]byte, error) {
 
 func (d *Deltas) DecodeSSZ(buf []byte, version int) error {
 	if len(buf) < d.EncodingSizeSSZ() {
-		return ssz.ErrLowBufferSize
+		return fmt.Errorf("[Deltas] err; %s", ssz.ErrLowBufferSize)
 	}
 	o1, o2 := ssz.DecodeOffset(buf[0:4]), ssz.DecodeOffset(buf[4:8])
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/ledgerwatch/erigon/searcher"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -105,6 +106,10 @@ type EthAPI interface {
 	GetWork(ctx context.Context) ([4]string, error)
 	SubmitWork(ctx context.Context, nonce types.BlockNonce, powHash, digest common.Hash) (bool, error)
 	SubmitHashrate(ctx context.Context, hashRate hexutil.Uint64, id common.Hash) (bool, error)
+
+	// Searcher related (see ./eth_searcher.go)
+	SearcherCallBundle(ctx context.Context, args searcher.CallBundleArgs) (*searcher.CallBundleResult, error)
+	SearcherCall(ctx context.Context, args searcher.CallArgs) (*searcher.CallResult, error)
 }
 
 type BaseAPI struct {

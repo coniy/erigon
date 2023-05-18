@@ -40,7 +40,7 @@ func (diff *StateOverride) Apply(s *state.IntraBlockState) error {
 		// Override account balance.
 		if account.Balance != nil {
 			balance, overflow := uint256.FromBig(account.Balance)
-			if !overflow {
+			if overflow {
 				return fmt.Errorf("account %s balance %s overflow", addr.Hex(), account.Balance.String())
 			}
 			s.SetBalance(addr, balance)
@@ -52,14 +52,22 @@ func (diff *StateOverride) Apply(s *state.IntraBlockState) error {
 		if account.State != nil {
 			storage := make(state.Storage)
 			for key, value := range *account.State {
-				storage[key] = *uint256.MustFromBig(value.Big())
+				v, overflow := uint256.FromBig(value.Big())
+				if overflow {
+					return fmt.Errorf("account %s storage %s=%s overflow", addr.Hex(), key.Hex(), value.String())
+				}
+				storage[key] = *v
 			}
 			s.SetStorage(addr, storage)
 		}
 		// Apply state diff into specified accounts.
 		if account.StateDiff != nil {
 			for key, value := range *account.StateDiff {
-				s.SetState(addr, &key, *uint256.MustFromBig(value.Big()))
+				v, overflow := uint256.FromBig(value.Big())
+				if overflow {
+					return fmt.Errorf("account %s storage %s=%s overflow", addr.Hex(), key.Hex(), value.String())
+				}
+				s.SetState(addr, &key, *v)
 			}
 		}
 	}

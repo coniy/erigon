@@ -30,6 +30,66 @@ import (
 	"time"
 )
 
+func (api *APIImpl) SearcherChainData(ctx context.Context, args searcher.ChainDataArgs) (*searcher.ChainDataResult, error) {
+	if args.StateBlockNumberOrHash == (rpc.BlockNumberOrHash{}) {
+		args.StateBlockNumberOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	}
+
+	dbtx, err := api.db.BeginRo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create ro transaction: %v", err)
+	}
+	defer dbtx.Rollback()
+
+	chainConfig, err := api.chainConfig(dbtx)
+	if err != nil {
+		return nil, fmt.Errorf("read chain config: %v", err)
+	}
+
+	blockNumber, hash, _, err := rpchelper.GetBlockNumber(args.StateBlockNumberOrHash, dbtx, api.filters)
+	if err != nil {
+		return nil, err
+	}
+
+	stateReader, err := rpchelper.CreateStateReader(ctx, dbtx, args.StateBlockNumberOrHash, 0, api.filters, api.stateCache, api.historyV3(dbtx), chainConfig.ChainName)
+	if err != nil {
+		return nil, fmt.Errorf("create state reader: %v", err)
+	}
+	ibs := state.New(stateReader)
+
+	parent, err := api._blockReader.Header(context.Background(), dbtx, hash, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch header %d(%x): %v", blockNumber, hash, err)
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("block %d(%x) not found", blockNumber, hash)
+	}
+
+	res := &searcher.ChainDataResult{
+		Header:      parent,
+		NextBaseFee: misc.CalcBaseFee(chainConfig, parent),
+	}
+	if len(args.Accounts) > 0 {
+		res.Accounts = make(map[common.Address]*searcher.Account)
+	}
+	for account, keys := range args.Accounts {
+		obj := ibs.GetOrNewStateObject(common.Address{})
+		res.Accounts[account] = &searcher.Account{
+			Balance: obj.Balance().ToBig(),
+			Nonce:   obj.Nonce(),
+		}
+		if len(keys) > 0 {
+			res.Accounts[account].State = make(map[common.Hash]common.Hash)
+			for _, key := range keys {
+				var value uint256.Int
+				obj.GetState(&key, &value)
+				res.Accounts[account].State[key] = value.Bytes32()
+			}
+		}
+	}
+	return res, nil
+}
+
 func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBundleArgs) (*searcher.CallBundleResult, error) {
 	if len(args.Txs) == 0 {
 		return nil, errors.New("missing txs")

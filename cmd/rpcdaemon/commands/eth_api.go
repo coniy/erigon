@@ -108,6 +108,7 @@ type EthAPI interface {
 	SubmitHashrate(ctx context.Context, hashRate hexutil.Uint64, id common.Hash) (bool, error)
 
 	// Searcher related (see ./eth_searcher.go)
+	SearcherChainData(ctx context.Context, args searcher.ChainDataArgs) (*searcher.ChainDataResult, error)
 	SearcherCallBundle(ctx context.Context, args searcher.CallBundleArgs) (*searcher.CallBundleResult, error)
 	SearcherCall(ctx context.Context, args searcher.CallArgs) (*searcher.CallResult, error)
 }

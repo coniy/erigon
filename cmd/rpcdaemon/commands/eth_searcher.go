@@ -73,7 +73,7 @@ func (api *APIImpl) SearcherChainData(ctx context.Context, args searcher.ChainDa
 		res.Accounts = make(map[common.Address]*searcher.Account)
 	}
 	for account, keys := range args.Accounts {
-		obj := ibs.GetOrNewStateObject(common.Address{})
+		obj := ibs.GetOrNewStateObject(account)
 		res.Accounts[account] = &searcher.Account{
 			Balance: obj.Balance().ToBig(),
 			Nonce:   obj.Nonce(),

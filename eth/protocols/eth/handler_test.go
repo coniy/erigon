@@ -35,7 +35,7 @@ import (
 	"github.com/ledgerwatch/erigon/eth/protocols/eth"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rlp"
-	"github.com/ledgerwatch/erigon/turbo/stages"
+	"github.com/ledgerwatch/erigon/turbo/stages/mock"
 )
 
 var (
@@ -90,17 +90,14 @@ func TestGetBlockReceipts(t *testing.T) {
 		hashes   []libcommon.Hash
 		receipts []rlp.RawValue
 	)
-
 	err := m.DB.View(m.Ctx, func(tx kv.Tx) error {
 		for i := uint64(0); i <= rawdb.ReadCurrentHeader(tx).Number.Uint64(); i++ {
-			block := rawdb.ReadHeaderByNumber(tx, i)
+			block, err := m.BlockReader.BlockByNumber(m.Ctx, tx, i)
+			require.NoError(t, err)
 
 			hashes = append(hashes, block.Hash())
 			// If known, encode and queue for response packet
-			r, err := rawdb.ReadReceiptsByHash(tx, block.Hash())
-			if err != nil {
-				return err
-			}
+			r := rawdb.ReadReceipts(tx, block, nil)
 			encoded, err := rlp.EncodeToBytes(r)
 			require.NoError(t, err)
 			receipts = append(receipts, encoded)
@@ -133,14 +130,14 @@ func TestGetBlockReceipts(t *testing.T) {
 
 // newTestBackend creates a chain with a number of explicitly defined blocks and
 // wraps it into a mock backend.
-func mockWithGenerator(t *testing.T, blocks int, generator func(int, *core.BlockGen)) *stages.MockSentry {
-	m := stages.MockWithGenesis(t, &types.Genesis{
+func mockWithGenerator(t *testing.T, blocks int, generator func(int, *core.BlockGen)) *mock.MockSentry {
+	m := mock.MockWithGenesis(t, &types.Genesis{
 		Config: params.TestChainConfig,
 		Alloc:  types.GenesisAlloc{testAddr: {Balance: big.NewInt(1000000)}},
 	}, testKey, false)
 	if blocks > 0 {
-		chain, _ := core.GenerateChain(m.ChainConfig, m.Genesis, m.Engine, m.DB, blocks, generator, true)
-		err := m.InsertChain(chain)
+		chain, _ := core.GenerateChain(m.ChainConfig, m.Genesis, m.Engine, m.DB, blocks, generator)
+		err := m.InsertChain(chain, nil)
 		require.NoError(t, err)
 	}
 	return m

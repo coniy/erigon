@@ -3,12 +3,11 @@ package forkchoice
 import (
 	"fmt"
 
-	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
-	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
-	"github.com/ledgerwatch/erigon/cl/phase1/core/transition"
+	"github.com/ledgerwatch/erigon/cl/transition"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon/cl/cltypes"
+	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
+	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"github.com/ledgerwatch/log/v3"
 )
 
@@ -75,7 +74,7 @@ func (f *ForkChoiceStore) getCheckpointState(checkpoint solid.Checkpoint) (*chec
 		return state, nil
 	}
 	// If it is not in cache compute it and then put in cache.
-	baseState, err := f.forkGraph.GetState(checkpoint.BlockRoot(), true)
+	baseState, _, err := f.forkGraph.GetState(checkpoint.BlockRoot(), true)
 	if err != nil {
 		return nil, err
 	}
@@ -86,19 +85,19 @@ func (f *ForkChoiceStore) getCheckpointState(checkpoint solid.Checkpoint) (*chec
 	if baseState.Slot() < f.computeStartSlotAtEpoch(checkpoint.Epoch()) {
 		log.Debug("Long checkpoint detected")
 		// If we require to change it then process the future epoch
-		if err := transition.ProcessSlots(baseState, f.computeStartSlotAtEpoch(checkpoint.Epoch())); err != nil {
+		if err := transition.DefaultMachine.ProcessSlots(baseState, f.computeStartSlotAtEpoch(checkpoint.Epoch())); err != nil {
 			return nil, err
 		}
 	}
 	mixes := baseState.RandaoMixes()
 	// TODO: make this copy smarter when validators is a smarter struct
-	validators := make([]*cltypes.Validator, baseState.ValidatorLength())
-	baseState.ForEachValidator(func(v *cltypes.Validator, idx, total int) bool {
+	validators := make([]solid.Validator, baseState.ValidatorLength())
+	baseState.ForEachValidator(func(v solid.Validator, idx, total int) bool {
 		validators[idx] = v
 		return true
 	})
 	checkpointState := newCheckpointState(f.forkGraph.Config(), validators,
-		mixes[:], baseState.GenesisValidatorsRoot(), baseState.Fork(), baseState.GetTotalActiveBalance(), state.Epoch(baseState.BeaconState))
+		mixes, baseState.GenesisValidatorsRoot(), baseState.Fork(), baseState.GetTotalActiveBalance(), state.Epoch(baseState.BeaconState))
 	// Cache in memory what we are left with.
 	f.checkpointStates.Add(checkpointComparable(checkpoint), checkpointState)
 	return checkpointState, nil

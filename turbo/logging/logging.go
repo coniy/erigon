@@ -52,6 +52,11 @@ func SetupLoggerCtx(filePrefix string, ctx *cli.Context, rootHandler bool) log.L
 	} else {
 		logger = log.New()
 	}
+
+	if logDirPrefix := ctx.String(LogDirPrefixFlag.Name); len(logDirPrefix) > 0 {
+		filePrefix = logDirPrefix
+	}
+
 	initSeparatedLogging(logger, filePrefix, dirPath, consoleLevel, dirLevel, consoleJson, dirJson)
 	return logger
 }
@@ -100,16 +105,22 @@ func SetupLoggerCmd(filePrefix string, cmd *cobra.Command) log.Logger {
 			dirPath = filepath.Join(datadir, "logs")
 		}
 	}
+
+	if logDirPrefix := cmd.Flags().Lookup(LogDirPrefixFlag.Name).Value.String(); len(logDirPrefix) > 0 {
+		filePrefix = logDirPrefix
+	}
+
 	initSeparatedLogging(log.Root(), filePrefix, dirPath, consoleLevel, dirLevel, consoleJson, dirJson)
 	return log.Root()
 }
 
 // SetupLoggerCmd perform the logging using parametrs specifying by `flag` package, and sets it to the root logger
 // This is the function which is NOT used by Erigon itself, but instead by utility commans
-func SetupLogger(filePrefix string) {
+func SetupLogger(filePrefix string) log.Logger {
 	var logConsoleVerbosity = flag.String(LogConsoleVerbosityFlag.Name, "", LogConsoleVerbosityFlag.Usage)
 	var logDirVerbosity = flag.String(LogDirVerbosityFlag.Name, "", LogDirVerbosityFlag.Usage)
 	var logDirPath = flag.String(LogDirPathFlag.Name, "", LogDirPathFlag.Usage)
+	var logDirPrefix = flag.String(LogDirPrefixFlag.Name, "", LogDirPrefixFlag.Usage)
 	var logVerbosity = flag.String(LogVerbosityFlag.Name, "", LogVerbosityFlag.Usage)
 	var logConsoleJson = flag.Bool(LogConsoleJsonFlag.Name, false, LogConsoleJsonFlag.Usage)
 	var logJson = flag.Bool(LogJsonFlag.Name, false, LogJsonFlag.Usage)
@@ -133,7 +144,12 @@ func SetupLogger(filePrefix string) {
 		dirLevel = log.LvlInfo
 	}
 
+	if logDirPrefix != nil && len(*logDirPrefix) > 0 {
+		filePrefix = *logDirPrefix
+	}
+
 	initSeparatedLogging(log.Root(), filePrefix, *logDirPath, consoleLevel, dirLevel, consoleJson, *dirJson)
+	return log.Root()
 }
 
 // initSeparatedLogging construct a log handler accrosing to the configuration parameters passed to it

@@ -3,6 +3,7 @@ package initial_state
 import (
 	_ "embed"
 	"fmt"
+
 	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 
 	"github.com/ledgerwatch/erigon/cl/clparams"
@@ -18,7 +19,7 @@ var sepoliaStateSSZ []byte
 var goerliStateSSZ []byte
 
 // Return genesis state
-func GetGenesisState(network clparams.NetworkType) (*state.BeaconState, error) {
+func GetGenesisState(network clparams.NetworkType) (*state.CachingBeaconState, error) {
 	_, _, config := clparams.GetConfigsByNetwork(network)
 	returnState := state.New(config)
 

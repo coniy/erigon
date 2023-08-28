@@ -7,7 +7,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/utils"
-	eth2_shuffle "github.com/protolambda/eth2-shuffle"
+	"github.com/ledgerwatch/erigon/common/eth2shuffle"
 )
 
 func ComputeShuffledIndex(conf *clparams.BeaconChainConfig, ind, ind_count uint64, seed [32]byte, preInputs [][32]byte, hashFunc utils.HashFunc) (uint64, error) {
@@ -54,8 +54,7 @@ func ComputeShuffledIndexPreInputs(conf *clparams.BeaconChainConfig, seed [32]by
 	return ret
 }
 
-func GetSeed(beaconConfig *clparams.BeaconChainConfig, mixes []common.Hash, epoch uint64, domain [4]byte) common.Hash {
-	mix := mixes[(epoch+beaconConfig.EpochsPerHistoricalVector-beaconConfig.MinSeedLookahead-1)%beaconConfig.EpochsPerHistoricalVector]
+func GetSeed(beaconConfig *clparams.BeaconChainConfig, mix common.Hash, epoch uint64, domain [4]byte) common.Hash {
 	epochByteArray := make([]byte, 8)
 	binary.LittleEndian.PutUint64(epochByteArray, epoch)
 	input := append(domain[:], epochByteArray...)
@@ -63,16 +62,16 @@ func GetSeed(beaconConfig *clparams.BeaconChainConfig, mixes []common.Hash, epoc
 	return utils.Keccak256(input)
 }
 
-func ComputeShuffledIndicies(beaconConfig *clparams.BeaconChainConfig, mixes []common.Hash, indicies []uint64, slot uint64) []uint64 {
+func ComputeShuffledIndicies(beaconConfig *clparams.BeaconChainConfig, mix common.Hash, indicies []uint64, slot uint64) []uint64 {
 	shuffledIndicies := make([]uint64, len(indicies))
 	copy(shuffledIndicies, indicies)
 	hashFunc := utils.OptimizedKeccak256NotThreadSafe()
 	epoch := slot / beaconConfig.SlotsPerEpoch
-	seed := GetSeed(beaconConfig, mixes, epoch, beaconConfig.DomainBeaconAttester)
+	seed := GetSeed(beaconConfig, mix, epoch, beaconConfig.DomainBeaconAttester)
 	eth2ShuffleHashFunc := func(data []byte) []byte {
 		hashed := hashFunc(data)
 		return hashed[:]
 	}
-	eth2_shuffle.UnshuffleList(eth2ShuffleHashFunc, shuffledIndicies, uint8(beaconConfig.ShuffleRoundCount), seed)
+	eth2shuffle.UnshuffleList(eth2ShuffleHashFunc, shuffledIndicies, uint8(beaconConfig.ShuffleRoundCount), seed)
 	return shuffledIndicies
 }

@@ -2,8 +2,7 @@ package state
 
 import (
 	"fmt"
-
-	"github.com/ledgerwatch/erigon/cl/phase1/core/state/raw"
+	"github.com/ledgerwatch/erigon/cl/abstract"
 
 	"github.com/Giulio2002/bls"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
@@ -25,12 +24,12 @@ func GetEpochAtSlot(config *clparams.BeaconChainConfig, slot uint64) uint64 {
 }
 
 // Epoch returns current epoch.
-func Epoch(b *raw.BeaconState) uint64 {
+func Epoch(b abstract.BeaconStateBasic) uint64 {
 	return GetEpochAtSlot(b.BeaconConfig(), b.Slot())
 }
 
 // GetTotalBalance return the sum of all balances within the given validator set.
-func GetTotalBalance(b *raw.BeaconState, validatorSet []uint64) (uint64, error) {
+func GetTotalBalance(b abstract.BeaconStateBasic, validatorSet []uint64) (uint64, error) {
 	var (
 		total uint64
 	)
@@ -50,8 +49,8 @@ func GetTotalBalance(b *raw.BeaconState, validatorSet []uint64) (uint64, error) 
 }
 
 // GetTotalSlashingAmount return the sum of all slashings.
-func GetTotalSlashingAmount(b *raw.BeaconState) (t uint64) {
-	b.ForEachSlashingSegment(func(v uint64, idx, total int) bool {
+func GetTotalSlashingAmount(b abstract.BeaconState) (t uint64) {
+	b.ForEachSlashingSegment(func(idx int, v uint64, total int) bool {
 		t += v
 		return true
 	})
@@ -59,7 +58,7 @@ func GetTotalSlashingAmount(b *raw.BeaconState) (t uint64) {
 }
 
 // PreviousEpoch returns previous epoch.
-func PreviousEpoch(b *raw.BeaconState) uint64 {
+func PreviousEpoch(b abstract.BeaconState) uint64 {
 	epoch := Epoch(b)
 	if epoch == 0 {
 		return epoch
@@ -68,22 +67,22 @@ func PreviousEpoch(b *raw.BeaconState) uint64 {
 }
 
 // GetBlockRoot returns blook root at start of a given epoch
-func GetBlockRoot(b *raw.BeaconState, epoch uint64) (libcommon.Hash, error) {
+func GetBlockRoot(b abstract.BeaconState, epoch uint64) (libcommon.Hash, error) {
 	return b.GetBlockRootAtSlot(epoch * b.BeaconConfig().SlotsPerEpoch)
 }
 
 // FinalityDelay determines by how many epochs we are late on finality.
-func FinalityDelay(b *raw.BeaconState) uint64 {
+func FinalityDelay(b abstract.BeaconState) uint64 {
 	return PreviousEpoch(b) - b.FinalizedCheckpoint().Epoch()
 }
 
 // Implementation of is_in_inactivity_leak. tells us if network is in danger pretty much. defined in ETH 2.0 specs.
-func InactivityLeaking(b *raw.BeaconState) bool {
+func InactivityLeaking(b abstract.BeaconState) bool {
 	return FinalityDelay(b) > b.BeaconConfig().MinEpochsToInactivityPenalty
 }
 
 // IsUnslashedParticipatingIndex
-func IsUnslashedParticipatingIndex(b *raw.BeaconState, epoch, index uint64, flagIdx int) bool {
+func IsUnslashedParticipatingIndex(b abstract.BeaconState, epoch, index uint64, flagIdx int) bool {
 	validator, err := b.ValidatorForValidatorIndex(int(index))
 	if err != nil {
 		return false
@@ -92,11 +91,11 @@ func IsUnslashedParticipatingIndex(b *raw.BeaconState, epoch, index uint64, flag
 }
 
 // EligibleValidatorsIndicies Implementation of get_eligible_validator_indices as defined in the eth 2.0 specs.
-func EligibleValidatorsIndicies(b *raw.BeaconState) (eligibleValidators []uint64) {
+func EligibleValidatorsIndicies(b abstract.BeaconState) (eligibleValidators []uint64) {
 	eligibleValidators = make([]uint64, 0, b.ValidatorLength())
 	previousEpoch := PreviousEpoch(b)
 
-	b.ForEachValidator(func(validator *cltypes.Validator, i, total int) bool {
+	b.ForEachValidator(func(validator solid.Validator, i, total int) bool {
 		if validator.Active(previousEpoch) || (validator.Slashed() && previousEpoch+1 < validator.WithdrawableEpoch()) {
 			eligibleValidators = append(eligibleValidators, uint64(i))
 		}
@@ -105,20 +104,23 @@ func EligibleValidatorsIndicies(b *raw.BeaconState) (eligibleValidators []uint64
 	return
 }
 
-func IsValidIndexedAttestation(b *raw.BeaconState, att *cltypes.IndexedAttestation) (bool, error) {
+func IsValidIndexedAttestation(b abstract.BeaconStateBasic, att *cltypes.IndexedAttestation) (bool, error) {
 	inds := att.AttestingIndices
-	if len(inds) == 0 || !utils.IsSliceSortedSet(inds) {
+	if inds.Length() == 0 || !solid.IsUint64SortedSet(inds) {
 		return false, fmt.Errorf("isValidIndexedAttestation: attesting indices are not sorted or are null")
 	}
 
-	pks := [][]byte{}
-	for _, v := range inds {
+	pks := make([][]byte, 0, inds.Length())
+	if err := solid.RangeErr[uint64](inds, func(_ int, v uint64, _ int) error {
 		val, err := b.ValidatorForValidatorIndex(int(v))
 		if err != nil {
-			return false, err
+			return err
 		}
-		pk := val.PublicKey()
-		pks = append(pks, pk[:])
+		pk := val.PublicKeyBytes()
+		pks = append(pks, pk)
+		return nil
+	}); err != nil {
+		return false, err
 	}
 
 	domain, err := b.GetDomain(b.BeaconConfig().DomainBeaconAttester, att.Data.Target().Epoch())
@@ -142,8 +144,8 @@ func IsValidIndexedAttestation(b *raw.BeaconState, att *cltypes.IndexedAttestati
 }
 
 // getUnslashedParticipatingIndices returns set of currently unslashed participating indexes
-func GetUnslashedParticipatingIndices(b *raw.BeaconState, flagIndex int, epoch uint64) (validatorSet []uint64, err error) {
-	var participation solid.BitList
+func GetUnslashedParticipatingIndices(b abstract.BeaconState, flagIndex int, epoch uint64) (validatorSet []uint64, err error) {
+	var participation *solid.BitList
 	// Must be either previous or current epoch
 	switch epoch {
 	case Epoch(b):
@@ -154,7 +156,7 @@ func GetUnslashedParticipatingIndices(b *raw.BeaconState, flagIndex int, epoch u
 		return nil, fmt.Errorf("getUnslashedParticipatingIndices: only epoch and previous epoch can be used")
 	}
 	// Iterate over all validators and include the active ones that have flag_index enabled and are not slashed.
-	b.ForEachValidator(func(validator *cltypes.Validator, i, total int) bool {
+	b.ForEachValidator(func(validator solid.Validator, i, total int) bool {
 		if !validator.Active(epoch) ||
 			!cltypes.ParticipationFlags(participation.Get(i)).HasFlag(flagIndex) ||
 			validator.Slashed() {
@@ -167,29 +169,29 @@ func GetUnslashedParticipatingIndices(b *raw.BeaconState, flagIndex int, epoch u
 }
 
 // Implementation of is_eligible_for_activation_queue. Specs at: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#is_eligible_for_activation_queue
-func IsValidatorEligibleForActivationQueue(b *raw.BeaconState, validator *cltypes.Validator) bool {
+func IsValidatorEligibleForActivationQueue(b abstract.BeaconState, validator solid.Validator) bool {
 	return validator.ActivationEligibilityEpoch() == b.BeaconConfig().FarFutureEpoch &&
 		validator.EffectiveBalance() == b.BeaconConfig().MaxEffectiveBalance
 }
 
 // Implementation of is_eligible_for_activation. Specs at: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#is_eligible_for_activation
-func IsValidatorEligibleForActivation(b *raw.BeaconState, validator *cltypes.Validator) bool {
+func IsValidatorEligibleForActivation(b abstract.BeaconState, validator solid.Validator) bool {
 	return validator.ActivationEligibilityEpoch() <= b.FinalizedCheckpoint().Epoch() &&
 		validator.ActivationEpoch() == b.BeaconConfig().FarFutureEpoch
 }
 
 // Check whether a merge transition is complete by verifying the presence of a valid execution payload header.
-func IsMergeTransitionComplete(b *raw.BeaconState) bool {
+func IsMergeTransitionComplete(b abstract.BeaconState) bool {
 	return !b.LatestExecutionPayloadHeader().IsZero()
 }
 
 // Compute the Unix timestamp at the specified slot number.
-func ComputeTimestampAtSlot(b *raw.BeaconState, slot uint64) uint64 {
+func ComputeTimestampAtSlot(b abstract.BeaconState, slot uint64) uint64 {
 	return b.GenesisTime() + (slot-b.BeaconConfig().GenesisSlot)*b.BeaconConfig().SecondsPerSlot
 }
 
 // ExpectedWithdrawals calculates the expected withdrawals that can be made by validators in the current epoch
-func ExpectedWithdrawals(b *raw.BeaconState) []*types.Withdrawal {
+func ExpectedWithdrawals(b abstract.BeaconState) []*types.Withdrawal {
 	// Get the current epoch, the next withdrawal index, and the next withdrawal validator index
 	currentEpoch := Epoch(b)
 	nextWithdrawalIndex := b.NextWithdrawalIndex()

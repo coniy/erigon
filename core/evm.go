@@ -32,9 +32,7 @@ import (
 )
 
 // NewEVMBlockContext creates a new context for use in the EVM.
-// excessDataGas must be set to the excessDataGas value from the *parent* block header, and can be
-// nil if the parent block is not of EIP-4844 type. It is read only.
-func NewEVMBlockContext(header *types.Header, blockHashFunc func(n uint64) libcommon.Hash, engine consensus.EngineReader, author *libcommon.Address, excessDataGas *big.Int) evmtypes.BlockContext {
+func NewEVMBlockContext(header *types.Header, blockHashFunc func(n uint64) libcommon.Hash, engine consensus.EngineReader, author *libcommon.Address) evmtypes.BlockContext {
 	// If we don't have an explicit author (i.e. not mining), extract from the header
 	var beneficiary libcommon.Address
 	if author == nil {
@@ -62,12 +60,6 @@ func NewEVMBlockContext(header *types.Header, blockHashFunc func(n uint64) libco
 	} else {
 		transferFunc = Transfer
 	}
-	// In the event excessDataGas is nil (which happens if the parent block is pre-sharding),
-	// we bootstrap BlockContext.ExcessDataGas with the zero value.
-	edg := new(big.Int)
-	if excessDataGas != nil {
-		edg.Set(excessDataGas)
-	}
 	return evmtypes.BlockContext{
 		CanTransfer:   CanTransfer,
 		Transfer:      transferFunc,
@@ -79,15 +71,16 @@ func NewEVMBlockContext(header *types.Header, blockHashFunc func(n uint64) libco
 		BaseFee:       &baseFee,
 		GasLimit:      header.GasLimit,
 		PrevRanDao:    prevRandDao,
-		ExcessDataGas: edg,
+		ExcessBlobGas: header.ExcessBlobGas,
 	}
 }
 
 // NewEVMTxContext creates a new transaction context for a single transaction.
 func NewEVMTxContext(msg Message) evmtypes.TxContext {
 	return evmtypes.TxContext{
-		Origin:   msg.From(),
-		GasPrice: msg.GasPrice(),
+		Origin:     msg.From(),
+		GasPrice:   msg.GasPrice(),
+		BlobHashes: msg.BlobHashes(),
 	}
 }
 

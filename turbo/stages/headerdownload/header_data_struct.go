@@ -8,15 +8,14 @@ import (
 	"time"
 
 	"github.com/google/btree"
-	"github.com/hashicorp/golang-lru/v2"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/etl"
-
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/rlp"
-	"github.com/ledgerwatch/erigon/turbo/engineapi"
 	"github.com/ledgerwatch/erigon/turbo/services"
+	"github.com/ledgerwatch/log/v3"
 )
 
 type QueueID uint8
@@ -252,24 +251,21 @@ type HeaderDownload struct {
 	stats                  Stats
 
 	consensusHeaderReader consensus.ChainHeaderReader
-	headerReader          services.HeaderReader
+	headerReader          services.HeaderAndCanonicalReader
 
 	// Proof of Stake (PoS)
-	firstSeenHeightPoS   *uint64
-	requestId            int
-	posAnchor            *Anchor
-	posStatus            SyncStatus
-	posSync              bool                         // Whether the chain is syncing in the PoS mode
-	headersCollector     *etl.Collector               // ETL collector for headers
-	BeaconRequestList    *engineapi.RequestList       // Requests from ethbackend to staged sync
-	PayloadStatusCh      chan engineapi.PayloadStatus // Responses (validation/execution status)
-	ShutdownCh           chan struct{}                // Channel to signal shutdown
-	pendingPayloadHash   common.Hash                  // Header whose status we still should send to PayloadStatusCh
-	pendingPayloadStatus *engineapi.PayloadStatus     // Alternatively, there can be an already prepared response to send to PayloadStatusCh
-	unsettledForkChoice  *engineapi.ForkChoiceMessage // Forkchoice to process after unwind
-	unsettledHeadHeight  uint64                       // Height of unsettledForkChoice.headBlockHash
-	posDownloaderTip     common.Hash                  // See https://hackmd.io/GDc0maGsQeKfP8o2C7L52w
-	badPoSHeaders        map[common.Hash]common.Hash  // Invalid Tip -> Last Valid Ancestor
+	firstSeenHeightPoS  *uint64
+	requestId           int
+	posAnchor           *Anchor
+	posStatus           SyncStatus
+	posSync             bool                        // Whether the chain is syncing in the PoS mode
+	headersCollector    *etl.Collector              // ETL collector for headers
+	ShutdownCh          chan struct{}               // Channel to signal shutdown
+	pendingPayloadHash  common.Hash                 // Header whose status we still should send to PayloadStatusCh
+	unsettledHeadHeight uint64                      // Height of unsettledForkChoice.headBlockHash
+	posDownloaderTip    common.Hash                 // See https://hackmd.io/GDc0maGsQeKfP8o2C7L52w
+	badPoSHeaders       map[common.Hash]common.Hash // Invalid Tip -> Last Valid Ancestor
+	logger              log.Logger
 }
 
 // HeaderRecord encapsulates two forms of the same header - raw RLP encoding (to avoid duplicated decodings and encodings), and parsed value types.Header
@@ -283,6 +279,7 @@ func NewHeaderDownload(
 	linkLimit int,
 	engine consensus.Engine,
 	headerReader services.HeaderAndCanonicalReader,
+	logger log.Logger,
 ) *HeaderDownload {
 	persistentLinkLimit := linkLimit / 16
 	hd := &HeaderDownload{
@@ -298,11 +295,10 @@ func NewHeaderDownload(
 		seenAnnounces:      NewSeenAnnounces(),
 		DeliveryNotify:     make(chan struct{}, 1),
 		QuitPoWMining:      make(chan struct{}),
-		BeaconRequestList:  engineapi.NewRequestList(),
-		PayloadStatusCh:    make(chan engineapi.PayloadStatus, 1),
 		ShutdownCh:         make(chan struct{}),
 		headerReader:       headerReader,
 		badPoSHeaders:      make(map[common.Hash]common.Hash),
+		logger:             logger,
 	}
 	heap.Init(&hd.persistedLinkQueue)
 	heap.Init(&hd.linkQueue)

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
@@ -65,7 +64,7 @@ type Sentinel struct {
 	ctx        context.Context
 	host       host.Host
 	cfg        *SentinelConfig
-	peers      *peers.Peers
+	peers      *peers.Manager
 	metadataV2 *cltypes.Metadata
 	handshaker *handshake.HandShaker
 
@@ -76,6 +75,7 @@ type Sentinel struct {
 	subManager           *GossipManager
 	metrics              bool
 	listenForPeersDoneCh chan struct{}
+	logger               log.Logger
 }
 
 func (s *Sentinel) createLocalNode(
@@ -88,7 +88,7 @@ func (s *Sentinel) createLocalNode(
 	if err != nil {
 		return nil, fmt.Errorf("could not open node's peer database: %w", err)
 	}
-	localNode := enode.NewLocalNode(db, privKey)
+	localNode := enode.NewLocalNode(db, privKey, s.logger)
 
 	ipEntry := enr.IP(ipAddr)
 	udpEntry := enr.UDP(udpPort)
@@ -231,12 +231,14 @@ func New(
 	ctx context.Context,
 	cfg *SentinelConfig,
 	db kv.RoDB,
+	logger log.Logger,
 ) (*Sentinel, error) {
 	s := &Sentinel{
 		ctx:     ctx,
 		cfg:     cfg,
 		db:      db,
 		metrics: true,
+		logger:  logger,
 	}
 
 	// Setup discovery
@@ -274,6 +276,14 @@ func New(
 		}
 		opts = append(opts, libp2p.ResourceManager(rmgr))
 	}
+
+	gater, err := NewGater(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	opts = append(opts, libp2p.ConnectionGater(gater))
+
 	host, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, err
@@ -282,7 +292,7 @@ func New(
 	s.handshaker = handshake.New(ctx, cfg.GenesisConfig, cfg.BeaconConfig, host)
 
 	s.host = host
-	s.peers = peers.New(s.host)
+	s.peers = peers.NewManager(ctx, s.host)
 
 	pubsub.TimeCacheDuration = 550 * gossipSubHeartbeatInterval
 	s.pubsub, err = pubsub.NewGossipSub(s.ctx, s.host, s.pubsubOptions()...)
@@ -299,7 +309,7 @@ func (s *Sentinel) RecvGossip() <-chan *pubsub.Message {
 
 func (s *Sentinel) Start() error {
 	if s.started {
-		log.Warn("[Sentinel] already running")
+		s.logger.Warn("[Sentinel] already running")
 	}
 	var err error
 	s.listener, err = s.createListener()
@@ -337,14 +347,20 @@ func (s *Sentinel) HasTooManyPeers() bool {
 }
 
 func (s *Sentinel) GetPeersCount() int {
+	// sub := s.subManager.GetMatchingSubscription(string(BeaconBlockTopic))
+
+	// if sub == nil {
 	return len(s.host.Network().Peers())
+	// }
+
+	// return len(sub.topic.ListPeers())
 }
 
 func (s *Sentinel) Host() host.Host {
 	return s.host
 }
 
-func (s *Sentinel) Peers() *peers.Peers {
+func (s *Sentinel) Peers() *peers.Manager {
 	return s.peers
 }
 

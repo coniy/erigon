@@ -197,13 +197,13 @@ func (ethash *Ethash) VerifyUncle(chain consensus.ChainHeaderReader, header *typ
 	return ethash.verifyHeader(chain, uncle, ancestors[uncle.ParentHash], true, seal)
 }
 
-func VerifyHeaderBasics(chain consensus.ChainHeaderReader, header, parent *types.Header, uncle bool) error {
+func VerifyHeaderBasics(chain consensus.ChainHeaderReader, header, parent *types.Header, checkTimestamp, skipGasLimit bool) error {
 	// Ensure that the header's extra-data section is of a reasonable size
 	if uint64(len(header.Extra)) > params.MaximumExtraDataSize {
 		return fmt.Errorf("extra-data too long: %d > %d", len(header.Extra), params.MaximumExtraDataSize)
 	}
 	// Verify the header's timestamp
-	if !uncle {
+	if checkTimestamp {
 		unixNow := time.Now().Unix()
 		if header.Time > uint64(unixNow+allowedFutureBlockTimeSeconds) {
 			return consensus.ErrFutureBlock
@@ -226,21 +226,18 @@ func VerifyHeaderBasics(chain consensus.ChainHeaderReader, header, parent *types
 		if header.BaseFee != nil {
 			return fmt.Errorf("invalid baseFee before fork: have %d, expected 'nil'", header.BaseFee)
 		}
-		// Verify that the gas limit remains within allowed bounds
-		diff := int64(parent.GasLimit) - int64(header.GasLimit)
-		if diff < 0 {
-			diff *= -1
+		if !skipGasLimit {
+			if err := misc.VerifyGaslimit(parent.GasLimit, header.GasLimit); err != nil {
+				return err
+			}
 		}
-		limit := parent.GasLimit / params.GasLimitBoundDivisor
-		if uint64(diff) >= limit || header.GasLimit < params.MinGasLimit {
-			return fmt.Errorf("invalid gas limit: have %d, want %d += %d", header.GasLimit, parent.GasLimit, limit)
-		}
-	} else if err := misc.VerifyEip1559Header(chain.Config(), parent, header); err != nil {
+	} else if err := misc.VerifyEip1559Header(chain.Config(), parent, header, skipGasLimit); err != nil {
 		// Verify the header's EIP-1559 attributes.
 		return err
 	}
-	if header.ExcessDataGas != nil {
-		return fmt.Errorf("invalid excessDataGas before fork: have %v, expected 'nil'", header.ExcessDataGas)
+
+	if err := misc.VerifyAbsenceOfCancunHeaderFields(header); err != nil {
+		return err
 	}
 
 	// Verify that the block number is parent's +1
@@ -263,7 +260,7 @@ func VerifyHeaderBasics(chain consensus.ChainHeaderReader, header, parent *types
 // stock Ethereum ethash engine.
 // See YP section 4.3.4. "Block Header Validity"
 func (ethash *Ethash) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header, uncle bool, seal bool) error {
-	if err := VerifyHeaderBasics(chain, header, parent, uncle); err != nil {
+	if err := VerifyHeaderBasics(chain, header, parent, !uncle /*checkTimestamp*/, false /*skipGasLimit*/); err != nil {
 		return err
 	}
 	// Verify the block's difficulty based on its timestamp and parent's difficulty
@@ -553,14 +550,14 @@ func (ethash *Ethash) Prepare(chain consensus.ChainHeaderReader, header *types.H
 }
 
 func (ethash *Ethash) Initialize(config *chain.Config, chain consensus.ChainHeaderReader, header *types.Header,
-	state *state.IntraBlockState, txs []types.Transaction, uncles []*types.Header, syscall consensus.SystemCall) {
+	state *state.IntraBlockState, syscall consensus.SysCallCustom) {
 }
 
 // Finalize implements consensus.Engine, accumulating the block and uncle rewards,
 // setting the final state on the header
 func (ethash *Ethash) Finalize(config *chain.Config, header *types.Header, state *state.IntraBlockState,
 	txs types.Transactions, uncles []*types.Header, r types.Receipts, withdrawals []*types.Withdrawal,
-	chain consensus.ChainHeaderReader, syscall consensus.SystemCall,
+	chain consensus.ChainReader, syscall consensus.SystemCall, logger log.Logger,
 ) (types.Transactions, types.Receipts, error) {
 	// Accumulate any block and uncle rewards and commit the final state root
 	accumulateRewards(config, state, header, uncles)
@@ -571,11 +568,11 @@ func (ethash *Ethash) Finalize(config *chain.Config, header *types.Header, state
 // uncle rewards, setting the final state and assembling the block.
 func (ethash *Ethash) FinalizeAndAssemble(chainConfig *chain.Config, header *types.Header, state *state.IntraBlockState,
 	txs types.Transactions, uncles []*types.Header, r types.Receipts, withdrawals []*types.Withdrawal,
-	chain consensus.ChainHeaderReader, syscall consensus.SystemCall, call consensus.Call,
+	chain consensus.ChainReader, syscall consensus.SystemCall, call consensus.Call, logger log.Logger,
 ) (*types.Block, types.Transactions, types.Receipts, error) {
 
 	// Finalize block
-	outTxs, outR, err := ethash.Finalize(chainConfig, header, state, txs, uncles, r, withdrawals, chain, syscall)
+	outTxs, outR, err := ethash.Finalize(chainConfig, header, state, txs, uncles, r, withdrawals, chain, syscall, logger)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -604,9 +601,6 @@ func (ethash *Ethash) SealHash(header *types.Header) (hash libcommon.Hash) {
 	}
 	if header.BaseFee != nil {
 		enc = append(enc, header.BaseFee)
-	}
-	if header.ExcessDataGas != nil {
-		enc = append(enc, header.ExcessDataGas)
 	}
 	rlp.Encode(hasher, enc)
 	hasher.Sum(hash[:0])

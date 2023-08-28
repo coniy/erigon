@@ -27,16 +27,17 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
-	"github.com/ledgerwatch/erigon-lib/chain"
-	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	types2 "github.com/ledgerwatch/erigon-lib/types"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/protolambda/ztyp/codec"
+
+	"github.com/ledgerwatch/erigon-lib/chain"
+	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
+	types2 "github.com/ledgerwatch/erigon-lib/types"
 
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/rlp"
 )
 
@@ -65,9 +66,9 @@ type Transaction interface {
 	GetEffectiveGasTip(baseFee *uint256.Int) *uint256.Int
 	GetFeeCap() *uint256.Int
 	Cost() *uint256.Int
-	GetDataHashes() []libcommon.Hash
+	GetBlobHashes() []libcommon.Hash
 	GetGas() uint64
-	GetDataGas() uint64
+	GetBlobGas() uint64
 	GetValue() *uint256.Int
 	Time() time.Time
 	GetTo() *libcommon.Address
@@ -94,7 +95,7 @@ type Transaction interface {
 	GetSender() (libcommon.Address, bool)
 	SetSender(libcommon.Address)
 	IsContractDeploy() bool
-	Unwrap() Transaction // If this is a network wrapper, returns the unwrapped tx. Otherwiwes returns itself.
+	Unwrap() Transaction // If this is a network wrapper, returns the unwrapped tx. Otherwise returns itself.
 }
 
 // TransactionMisc is collection of miscelaneous fields for transaction that is supposed to be embedded into concrete
@@ -160,9 +161,6 @@ func DecodeWrappedTransaction(data []byte) (Transaction, error) {
 	}
 	if data[0] < 0x80 { // the encoding is canonical, not RLP
 
-		// EIP-4844 tx differs from previous types of transactions in network
-		// encoding. It's SSZ encoded and includes blobs and kzgs.
-		// Previous types have no different encoding.
 		return UnmarshalWrappedTransactionFromBinary(data)
 	}
 	s := rlp.NewStream(bytes.NewReader(data), uint64(len(data)))
@@ -188,12 +186,6 @@ func UnmarshalTransactionFromBinary(data []byte) (Transaction, error) {
 		return nil, fmt.Errorf("short input: %v", len(data))
 	}
 	switch data[0] {
-	case BlobTxType:
-		t := &SignedBlobTx{}
-		if err := DecodeSSZ(data[1:], t); err != nil {
-			return nil, err
-		}
-		return t, nil
 	case AccessListTxType:
 		s := rlp.NewStream(bytes.NewReader(data[1:]), uint64(len(data)-1))
 		t := &AccessListTx{}
@@ -204,6 +196,13 @@ func UnmarshalTransactionFromBinary(data []byte) (Transaction, error) {
 	case DynamicFeeTxType:
 		s := rlp.NewStream(bytes.NewReader(data[1:]), uint64(len(data)-1))
 		t := &DynamicFeeTransaction{}
+		if err := t.DecodeRLP(s); err != nil {
+			return nil, err
+		}
+		return t, nil
+	case BlobTxType:
+		s := rlp.NewStream(bytes.NewReader(data[1:]), uint64(len(data)-1))
+		t := &BlobTx{}
 		if err := t.DecodeRLP(s); err != nil {
 			return nil, err
 		}
@@ -225,8 +224,9 @@ func UnmarshalWrappedTransactionFromBinary(data []byte) (Transaction, error) {
 	if data[0] != BlobTxType {
 		return UnmarshalTransactionFromBinary(data)
 	}
+	s := rlp.NewStream(bytes.NewReader(data[1:]), uint64(len(data)-1))
 	t := &BlobTxWrapper{}
-	if err := DecodeSSZ(data[1:], t); err != nil {
+	if err := t.DecodeRLP(s); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -520,15 +520,18 @@ type Message struct {
 	gasPrice         uint256.Int
 	feeCap           uint256.Int
 	tip              uint256.Int
-	maxFeePerDataGas uint256.Int
+	maxFeePerBlobGas uint256.Int
 	data             []byte
 	accessList       types2.AccessList
 	checkNonce       bool
 	isFree           bool
-	dataHashes       []libcommon.Hash
+	blobHashes       []libcommon.Hash
 }
 
-func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amount *uint256.Int, gasLimit uint64, gasPrice *uint256.Int, feeCap, tip *uint256.Int, data []byte, accessList types2.AccessList, checkNonce bool, isFree bool, maxFeePerDataGas *uint256.Int) Message {
+func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amount *uint256.Int, gasLimit uint64,
+	gasPrice *uint256.Int, feeCap, tip *uint256.Int, data []byte, accessList types2.AccessList, checkNonce bool,
+	isFree bool, maxFeePerBlobGas *uint256.Int,
+) Message {
 	m := Message{
 		from:       from,
 		to:         to,
@@ -549,8 +552,8 @@ func NewMessage(from libcommon.Address, to *libcommon.Address, nonce uint64, amo
 	if feeCap != nil {
 		m.feeCap.Set(feeCap)
 	}
-	if maxFeePerDataGas != nil {
-		m.maxFeePerDataGas.Set(maxFeePerDataGas)
+	if maxFeePerBlobGas != nil {
+		m.maxFeePerBlobGas.Set(maxFeePerBlobGas)
 	}
 	return m
 }
@@ -590,12 +593,13 @@ func (m *Message) ChangeGas(globalGasCap, desiredGas uint64) {
 	m.gasLimit = gas
 }
 
-func (m Message) DataGas() uint64 { return params.DataGasPerBlob * uint64(len(m.dataHashes)) }
-func (m Message) MaxFeePerDataGas() *uint256.Int {
-	return &m.maxFeePerDataGas
+func (m Message) BlobGas() uint64 { return fixedgas.BlobGasPerBlob * uint64(len(m.blobHashes)) }
+
+func (m Message) MaxFeePerBlobGas() *uint256.Int {
+	return &m.maxFeePerBlobGas
 }
 
-func (m Message) DataHashes() []libcommon.Hash { return m.dataHashes }
+func (m Message) BlobHashes() []libcommon.Hash { return m.blobHashes }
 
 func DecodeSSZ(data []byte, dest codec.Deserializable) error {
 	err := dest.Deserialize(codec.NewDecodingReader(bytes.NewReader(data), uint64(len(data))))

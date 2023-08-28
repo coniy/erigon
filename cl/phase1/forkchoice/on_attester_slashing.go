@@ -3,10 +3,10 @@ package forkchoice
 import (
 	"fmt"
 
+	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
 	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 
 	"github.com/ledgerwatch/erigon/cl/cltypes"
-	"github.com/ledgerwatch/erigon/cl/utils"
 )
 
 func (f *ForkChoiceStore) OnAttesterSlashing(attesterSlashing *cltypes.AttesterSlashing) error {
@@ -19,7 +19,7 @@ func (f *ForkChoiceStore) OnAttesterSlashing(attesterSlashing *cltypes.AttesterS
 		return fmt.Errorf("attestation data is not slashable")
 	}
 	// Retrieve justified state
-	s, err := f.forkGraph.GetState(f.justifiedCheckpoint.BlockRoot(), false)
+	s, _, err := f.forkGraph.GetState(f.justifiedCheckpoint.BlockRoot(), false)
 	if err != nil {
 		return err
 	}
@@ -27,7 +27,7 @@ func (f *ForkChoiceStore) OnAttesterSlashing(attesterSlashing *cltypes.AttesterS
 		return fmt.Errorf("justified checkpoint state not accessible")
 	}
 	// Verify validity of slashings
-	valid, err := state.IsValidIndexedAttestation(s.BeaconState, attestation1)
+	valid, err := state.IsValidIndexedAttestation(s, attestation1)
 	if err != nil {
 		return fmt.Errorf("error calculating indexed attestation 1 validity: %v", err)
 	}
@@ -35,14 +35,14 @@ func (f *ForkChoiceStore) OnAttesterSlashing(attesterSlashing *cltypes.AttesterS
 		return fmt.Errorf("invalid indexed attestation 1")
 	}
 
-	valid, err = state.IsValidIndexedAttestation(s.BeaconState, attestation2)
+	valid, err = state.IsValidIndexedAttestation(s, attestation2)
 	if err != nil {
 		return fmt.Errorf("error calculating indexed attestation 2 validity: %v", err)
 	}
 	if !valid {
 		return fmt.Errorf("invalid indexed attestation 2")
 	}
-	for _, index := range utils.IntersectionOfSortedSets(attestation1.AttestingIndices, attestation2.AttestingIndices) {
+	for _, index := range solid.IntersectionOfSortedSets(attestation1.AttestingIndices, attestation2.AttestingIndices) {
 		f.equivocatingIndicies[index] = struct{}{}
 	}
 	// add attestation indicies to equivocating indicies.

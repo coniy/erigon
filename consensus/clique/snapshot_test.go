@@ -34,7 +34,7 @@ import (
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/turbo/stages"
+	"github.com/ledgerwatch/erigon/turbo/stages/mock"
 	"github.com/ledgerwatch/log/v3"
 )
 
@@ -426,8 +426,9 @@ func TestClique(t *testing.T) {
 
 			engine := clique.New(&config, params.CliqueSnapshot, cliqueDB, log.New())
 			engine.FakeDiff = true
+			checkStateRoot := true
 			// Create a pristine blockchain with the genesis injected
-			m := stages.MockWithGenesisEngine(t, genesis, engine, false)
+			m := mock.MockWithGenesisEngine(t, genesis, engine, false, checkStateRoot)
 
 			chain, err := core.GenerateChain(m.ChainConfig, m.Genesis, m.Engine, m.DB, len(tt.votes), func(j int, gen *core.BlockGen) {
 				// Cast the vote contained in this block
@@ -437,7 +438,7 @@ func TestClique(t *testing.T) {
 					copy(nonce[:], clique.NonceAuthVote)
 					gen.SetNonce(nonce)
 				}
-			}, false /* intermediateHashes */)
+			})
 			if err != nil {
 				t.Fatalf("generate blocks: %v", err)
 			}
@@ -476,7 +477,7 @@ func TestClique(t *testing.T) {
 					chainX.Headers[k] = b.Header()
 				}
 				chainX.TopBlock = batches[j][len(batches[j])-1]
-				if err = m.InsertChain(chainX); err != nil {
+				if err = m.InsertChain(chainX, nil); err != nil {
 					t.Errorf("test %d: failed to import batch %d, %v", i, j, err)
 					failed = true
 					break
@@ -492,7 +493,7 @@ func TestClique(t *testing.T) {
 				chainX.Headers[k] = b.Header()
 			}
 			chainX.TopBlock = batches[len(batches)-1][len(batches[len(batches)-1])-1]
-			err = m.InsertChain(chainX)
+			err = m.InsertChain(chainX, nil)
 			if tt.failure != nil && err == nil {
 				t.Errorf("test %d: expected failure", i)
 			}
@@ -508,7 +509,7 @@ func TestClique(t *testing.T) {
 
 			var snap *clique.Snapshot
 			if err := m.DB.View(context.Background(), func(tx kv.Tx) error {
-				snap, err = engine.Snapshot(stagedsync.ChainReader{Cfg: config, Db: tx}, head.NumberU64(), head.Hash(), nil)
+				snap, err = engine.Snapshot(stagedsync.ChainReader{Cfg: config, Db: tx, BlockReader: m.BlockReader}, head.NumberU64(), head.Hash(), nil)
 				if err != nil {
 					return err
 				}

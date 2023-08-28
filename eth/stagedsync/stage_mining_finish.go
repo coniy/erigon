@@ -5,6 +5,8 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon/turbo/builder"
+	"github.com/ledgerwatch/erigon/turbo/services"
 	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon/consensus"
@@ -12,11 +14,13 @@ import (
 )
 
 type MiningFinishCfg struct {
-	db          kv.RwDB
-	chainConfig chain.Config
-	engine      consensus.Engine
-	sealCancel  chan struct{}
-	miningState MiningState
+	db                    kv.RwDB
+	chainConfig           chain.Config
+	engine                consensus.Engine
+	sealCancel            chan struct{}
+	miningState           MiningState
+	blockReader           services.FullBlockReader
+	latestBlockBuiltStore *builder.LatestBlockBuiltStore
 }
 
 func StageMiningFinishCfg(
@@ -25,13 +29,17 @@ func StageMiningFinishCfg(
 	engine consensus.Engine,
 	miningState MiningState,
 	sealCancel chan struct{},
+	blockReader services.FullBlockReader,
+	latestBlockBuiltStore *builder.LatestBlockBuiltStore,
 ) MiningFinishCfg {
 	return MiningFinishCfg{
-		db:          db,
-		chainConfig: chainConfig,
-		engine:      engine,
-		miningState: miningState,
-		sealCancel:  sealCancel,
+		db:                    db,
+		chainConfig:           chainConfig,
+		engine:                engine,
+		miningState:           miningState,
+		sealCancel:            sealCancel,
+		blockReader:           blockReader,
+		latestBlockBuiltStore: latestBlockBuiltStore,
 	}
 }
 
@@ -55,7 +63,7 @@ func SpawnMiningFinishStage(s *StageState, tx kv.RwTx, cfg MiningFinishCfg, quit
 	//	return nil
 	//}
 	//prev = sealHash
-
+	cfg.latestBlockBuiltStore.AddBlockBuilt(block)
 	if cfg.miningState.MiningResultPOSCh != nil {
 		cfg.miningState.MiningResultPOSCh <- blockWithReceipts
 		return nil
@@ -87,7 +95,7 @@ func SpawnMiningFinishStage(s *StageState, tx kv.RwTx, cfg MiningFinishCfg, quit
 	default:
 		logger.Trace("None in-flight sealing task.")
 	}
-	chain := ChainReader{Cfg: cfg.chainConfig, Db: tx}
+	chain := ChainReader{Cfg: cfg.chainConfig, Db: tx, BlockReader: cfg.blockReader}
 	if err := cfg.engine.Seal(chain, block, cfg.miningState.MiningResultCh, cfg.sealCancel); err != nil {
 		logger.Warn("Block sealing failed", "err", err)
 	}

@@ -2,16 +2,17 @@ package spectest
 
 import (
 	"fmt"
-	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"io/fs"
 	"os"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/ledgerwatch/erigon-lib/types/ssz"
 
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/cltypes"
+	"github.com/ledgerwatch/erigon/cl/phase1/core/state"
 	"github.com/ledgerwatch/erigon/cl/utils"
-	"gopkg.in/yaml.v3"
 )
 
 func ReadMeta(root fs.FS, name string, obj any) error {
@@ -50,7 +51,7 @@ func ReadSszOld(root fs.FS, obj ssz.Unmarshaler, version clparams.StateVersion, 
 	return ReadSsz(root, version, name, obj)
 }
 
-func ReadBeaconState(root fs.FS, version clparams.StateVersion, name string) (*state.BeaconState, error) {
+func ReadBeaconState(root fs.FS, version clparams.StateVersion, name string) (*state.CachingBeaconState, error) {
 	sszSnappy, err := fs.ReadFile(root, name)
 	if err != nil {
 		return nil, err
@@ -73,7 +74,7 @@ func ReadBlock(root fs.FS, version clparams.StateVersion, index int) (*cltypes.S
 	if err != nil {
 		return nil, err
 	}
-	blk := &cltypes.SignedBeaconBlock{}
+	blk := cltypes.NewSignedBeaconBlock(&clparams.MainnetBeaconConfig)
 	if err = utils.DecodeSSZSnappy(blk, blockBytes, int(version)); err != nil {
 		return nil, err
 	}
@@ -90,7 +91,7 @@ func ReadAnchorBlock(root fs.FS, version clparams.StateVersion, name string) (*c
 	if err != nil {
 		return nil, err
 	}
-	blk := &cltypes.BeaconBlock{}
+	blk := cltypes.NewBeaconBlock(&clparams.MainnetBeaconConfig)
 	if err = utils.DecodeSSZSnappy(blk, blockBytes, int(version)); err != nil {
 		return nil, err
 	}
@@ -125,7 +126,7 @@ func ReadBlocks(root fs.FS, version clparams.StateVersion) ([]*cltypes.SignedBea
 		if err != nil {
 			break
 		}
-		blk := &cltypes.SignedBeaconBlock{}
+		blk := cltypes.NewSignedBeaconBlock(&clparams.MainnetBeaconConfig)
 		if err = utils.DecodeSSZSnappy(blk, blockBytes, int(version)); err != nil {
 			return nil, err
 		}

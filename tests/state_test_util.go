@@ -30,6 +30,7 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/kv"
@@ -42,8 +43,9 @@ import (
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/params"
+	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/rlp"
+	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/trie"
 )
 
@@ -66,7 +68,7 @@ func (t *StateTest) UnmarshalJSON(in []byte) error {
 type stJSON struct {
 	Env  stEnv                    `json:"env"`
 	Pre  types.GenesisAlloc       `json:"pre"`
-	Tx   stTransactionMarshaling  `json:"transaction"`
+	Tx   stTransaction            `json:"transaction"`
 	Out  hexutility.Bytes         `json:"out"`
 	Post map[string][]stPostState `json:"post"`
 }
@@ -83,7 +85,7 @@ type stPostState struct {
 	}
 }
 
-type stTransactionMarshaling struct {
+type stTransaction struct {
 	GasPrice             *math.HexOrDecimal256 `json:"gasPrice"`
 	MaxFeePerGas         *math.HexOrDecimal256 `json:"maxFeePerGas"`
 	MaxPriorityFeePerGas *math.HexOrDecimal256 `json:"maxPriorityFeePerGas"`
@@ -94,6 +96,7 @@ type stTransactionMarshaling struct {
 	Data                 []string              `json:"data"`
 	Value                []string              `json:"value"`
 	AccessLists          []*types2.AccessList  `json:"accessLists,omitempty"`
+	BlobGasFeeCap        *math.HexOrDecimal256 `json:"maxFeePerBlobGas,omitempty"`
 }
 
 //go:generate gencodec -type stEnv -field-override stEnvMarshaling -out gen_stenv.go
@@ -192,8 +195,16 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	if err != nil {
 		return nil, libcommon.Hash{}, UnsupportedForkError{subtest.Fork}
 	}
-	statedb := state.New(state.NewPlainStateReader(tx))
-	w := state.NewPlainStateWriter(tx, nil, writeBlockNr)
+
+	r := rpchelper.NewLatestStateReader(tx)
+	statedb := state.New(r)
+
+	var w state.StateWriter
+	if ethconfig.EnableHistoryV4InTest {
+		panic("implement me")
+	} else {
+		w = state.NewPlainStateWriter(tx, nil, writeBlockNr)
+	}
 
 	var baseFee *big.Int
 	if config.IsLondon(0) {
@@ -214,7 +225,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 		if err != nil {
 			return nil, libcommon.Hash{}, err
 		}
-		msg, err = txn.AsMessage(*types.MakeSigner(config, 0), baseFee, config.Rules(0, 0))
+		msg, err = txn.AsMessage(*types.MakeSigner(config, 0, 0), baseFee, config.Rules(0, 0))
 		if err != nil {
 			return nil, libcommon.Hash{}, err
 		}
@@ -223,7 +234,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	// Prepare the EVM.
 	txContext := core.NewEVMTxContext(msg)
 	header := block.Header()
-	context := core.NewEVMBlockContext(header, core.GetHashFn(header, nil), nil, &t.json.Env.Coinbase, nil /*excessDataGas*/)
+	context := core.NewEVMBlockContext(header, core.GetHashFn(header, nil), nil, &t.json.Env.Coinbase)
 	context.GetHash = vmTestBlockHash
 	if baseFee != nil {
 		context.BaseFee = new(uint256.Int)
@@ -238,7 +249,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	// Execute the message.
 	snapshot := statedb.Snapshot()
 	gaspool := new(core.GasPool)
-	gaspool.AddGas(block.GasLimit()).AddDataGas(params.MaxDataGasPerBlock)
+	gaspool.AddGas(block.GasLimit()).AddBlobGas(fixedgas.MaxBlobGasPerBlock)
 	if _, err = core.ApplyMessage(evm, msg, gaspool, true /* refunds */, false /* gasBailout */); err != nil {
 		statedb.RevertToSnapshot(snapshot)
 	}
@@ -293,12 +304,11 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	if err != nil {
 		return nil, libcommon.Hash{}, fmt.Errorf("error calculating state root: %w", err)
 	}
-
 	return statedb, root, nil
 }
 
 func MakePreState(rules *chain.Rules, tx kv.RwTx, accounts types.GenesisAlloc, blockNr uint64) (*state.IntraBlockState, error) {
-	r := state.NewPlainStateReader(tx)
+	r := rpchelper.NewLatestStateReader(tx)
 	statedb := state.New(r)
 	for addr, a := range accounts {
 		statedb.SetCode(addr, a.Code)
@@ -325,11 +335,17 @@ func MakePreState(rules *chain.Rules, tx kv.RwTx, accounts types.GenesisAlloc, b
 		}
 	}
 
+	var w state.StateWriter
+	if ethconfig.EnableHistoryV4InTest {
+		panic("implement me")
+	} else {
+		w = state.NewPlainStateWriter(tx, nil, blockNr+1)
+	}
 	// Commit and re-open to start with a clean state.
-	if err := statedb.FinalizeTx(rules, state.NewPlainStateWriter(tx, nil, blockNr+1)); err != nil {
+	if err := statedb.FinalizeTx(rules, w); err != nil {
 		return nil, err
 	}
-	if err := statedb.CommitBlock(rules, state.NewPlainStateWriter(tx, nil, blockNr+1)); err != nil {
+	if err := statedb.CommitBlock(rules, w); err != nil {
 		return nil, err
 	}
 	return statedb, nil
@@ -360,7 +376,7 @@ func vmTestBlockHash(n uint64) libcommon.Hash {
 	return libcommon.BytesToHash(crypto.Keccak256([]byte(big.NewInt(int64(n)).String())))
 }
 
-func toMessage(tx stTransactionMarshaling, ps stPostState, baseFee *big.Int) (core.Message, error) {
+func toMessage(tx stTransaction, ps stPostState, baseFee *big.Int) (core.Message, error) {
 	// Derive sender from private key if present.
 	var from libcommon.Address
 	if len(tx.PrivateKey) > 0 {
@@ -382,13 +398,13 @@ func toMessage(tx stTransactionMarshaling, ps stPostState, baseFee *big.Int) (co
 
 	// Get values specific to this post state.
 	if ps.Indexes.Data > len(tx.Data) {
-		return nil, fmt.Errorf("tx data index %d out of bounds", ps.Indexes.Data)
+		return nil, fmt.Errorf("txn data index %d out of bounds", ps.Indexes.Data)
 	}
 	if ps.Indexes.Value > len(tx.Value) {
-		return nil, fmt.Errorf("tx value index %d out of bounds", ps.Indexes.Value)
+		return nil, fmt.Errorf("txn value index %d out of bounds", ps.Indexes.Value)
 	}
 	if ps.Indexes.Gas > len(tx.GasLimit) {
-		return nil, fmt.Errorf("tx gas limit index %d out of bounds", ps.Indexes.Gas)
+		return nil, fmt.Errorf("txn gas limit index %d out of bounds", ps.Indexes.Gas)
 	}
 	dataHex := tx.Data[ps.Indexes.Data]
 	valueHex := tx.Value[ps.Indexes.Value]
@@ -398,17 +414,17 @@ func toMessage(tx stTransactionMarshaling, ps stPostState, baseFee *big.Int) (co
 	if valueHex != "0x" {
 		va, ok := math.ParseBig256(valueHex)
 		if !ok {
-			return nil, fmt.Errorf("invalid tx value %q", valueHex)
+			return nil, fmt.Errorf("invalid txn value %q", valueHex)
 		}
 		v, overflow := uint256.FromBig(va)
 		if overflow {
-			return nil, fmt.Errorf("invalid tx value (overflowed) %q", valueHex)
+			return nil, fmt.Errorf("invalid txn value (overflowed) %q", valueHex)
 		}
 		value = v
 	}
 	data, err := hex.DecodeString(strings.TrimPrefix(dataHex, "0x"))
 	if err != nil {
-		return nil, fmt.Errorf("invalid tx data %q", dataHex)
+		return nil, fmt.Errorf("invalid txn data %q", dataHex)
 	}
 	var accessList types2.AccessList
 	if tx.AccessLists != nil && tx.AccessLists[ps.Indexes.Data] != nil {
@@ -443,6 +459,11 @@ func toMessage(tx stTransactionMarshaling, ps stPostState, baseFee *big.Int) (co
 	gpi := big.Int(*gasPrice)
 	gasPriceInt := uint256.NewInt(gpi.Uint64())
 
+	var blobFeeCap *big.Int
+	if tx.BlobGasFeeCap != nil {
+		blobFeeCap = (*big.Int)(tx.BlobGasFeeCap)
+	}
+
 	// TODO the conversion to int64 then uint64 then new int isn't working!
 	msg := types.NewMessage(
 		from,
@@ -451,13 +472,13 @@ func toMessage(tx stTransactionMarshaling, ps stPostState, baseFee *big.Int) (co
 		value,
 		uint64(gasLimit),
 		gasPriceInt,
-		uint256.NewInt(feeCap.Uint64()),
-		uint256.NewInt(tipCap.Uint64()),
+		uint256.MustFromBig(&feeCap),
+		uint256.MustFromBig(&tipCap),
 		data,
 		accessList,
 		false, /* checkNonce */
 		false, /* isFree */
-		uint256.NewInt(tipCap.Uint64()),
+		uint256.MustFromBig(blobFeeCap),
 	)
 
 	return msg, nil

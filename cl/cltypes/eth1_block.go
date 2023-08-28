@@ -5,10 +5,11 @@ import (
 	"math/big"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/types/ssz"
 
 	"github.com/ledgerwatch/erigon/cl/clparams"
-	"github.com/ledgerwatch/erigon/common"
+	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
+	"github.com/ledgerwatch/erigon/cl/merkle_tree"
+	ssz2 "github.com/ledgerwatch/erigon/cl/ssz"
 	"github.com/ledgerwatch/erigon/consensus/merge"
 	"github.com/ledgerwatch/erigon/core/types"
 )
@@ -25,24 +26,26 @@ type Eth1Block struct {
 	GasLimit      uint64
 	GasUsed       uint64
 	Time          uint64
-	Extra         []byte
+	Extra         *solid.ExtraData
 	BaseFeePerGas [32]byte
 	// Extra fields
 	BlockHash     libcommon.Hash
-	Transactions  *TransactionsSSZ
-	Withdrawals   types.Withdrawals
-	ExcessDataGas [32]byte
+	Transactions  *solid.TransactionsSSZ
+	Withdrawals   *solid.ListSSZ[*types.Withdrawal]
+	BlobGasUsed   uint64
+	ExcessBlobGas uint64
 	// internals
-	version clparams.StateVersion
+	version   clparams.StateVersion
+	beaconCfg *clparams.BeaconChainConfig
 }
 
 // NewEth1Block creates a new Eth1Block.
-func NewEth1Block(version clparams.StateVersion) *Eth1Block {
-	return &Eth1Block{version: version}
+func NewEth1Block(version clparams.StateVersion, beaconCfg *clparams.BeaconChainConfig) *Eth1Block {
+	return &Eth1Block{version: version, beaconCfg: beaconCfg}
 }
 
 // NewEth1BlockFromHeaderAndBody with given header/body.
-func NewEth1BlockFromHeaderAndBody(header *types.Header, body *types.RawBody) *Eth1Block {
+func NewEth1BlockFromHeaderAndBody(header *types.Header, body *types.RawBody, beaconCfg *clparams.BeaconChainConfig) *Eth1Block {
 	baseFeeBytes := header.BaseFee.Bytes()
 	for i, j := 0, len(baseFeeBytes)-1; i < j; i, j = i+1, j-1 {
 		baseFeeBytes[i], baseFeeBytes[j] = baseFeeBytes[j], baseFeeBytes[i]
@@ -50,15 +53,8 @@ func NewEth1BlockFromHeaderAndBody(header *types.Header, body *types.RawBody) *E
 	var baseFee32 [32]byte
 	copy(baseFee32[:], baseFeeBytes)
 
-	var excessDataGas32 [32]byte
-	if header.ExcessDataGas != nil {
-		excessDataGasBytes := header.ExcessDataGas.Bytes()
-		for i, j := 0, len(excessDataGasBytes)-1; i < j; i, j = i+1, j-1 {
-			excessDataGasBytes[i], excessDataGasBytes[j] = excessDataGasBytes[j], excessDataGasBytes[i]
-		}
-		copy(excessDataGas32[:], excessDataGasBytes)
-	}
-
+	extra := solid.NewExtraData()
+	extra.SetBytes(header.Extra)
 	block := &Eth1Block{
 		ParentHash:    header.ParentHash,
 		FeeRecipient:  header.Coinbase,
@@ -70,15 +66,17 @@ func NewEth1BlockFromHeaderAndBody(header *types.Header, body *types.RawBody) *E
 		GasLimit:      header.GasLimit,
 		GasUsed:       header.GasUsed,
 		Time:          header.Time,
-		Extra:         header.Extra,
+		Extra:         extra,
 		BaseFeePerGas: baseFee32,
 		BlockHash:     header.Hash(),
-		Transactions:  NewTransactionsSSZFromTransactions(body.Transactions),
-		Withdrawals:   body.Withdrawals,
-		ExcessDataGas: excessDataGas32,
+		Transactions:  solid.NewTransactionsSSZFromTransactions(body.Transactions),
+		Withdrawals:   solid.NewStaticListSSZFromList(body.Withdrawals, int(beaconCfg.MaxWithdrawalsPerPayload), 44),
+		beaconCfg:     beaconCfg,
 	}
 
-	if header.ExcessDataGas != nil {
+	if header.BlobGasUsed != nil && header.ExcessBlobGas != nil {
+		block.BlobGasUsed = *header.BlobGasUsed
+		block.ExcessBlobGas = *header.ExcessBlobGas
 		block.version = clparams.DenebVersion
 	} else if header.WithdrawalsHash != nil {
 		block.version = clparams.CapellaVersion
@@ -86,6 +84,10 @@ func NewEth1BlockFromHeaderAndBody(header *types.Header, body *types.RawBody) *E
 		block.version = clparams.BellatrixVersion
 	}
 	return block
+}
+
+func (*Eth1Block) Static() bool {
+	return false
 }
 
 // PayloadHeader returns the equivalent ExecutionPayloadHeader object.
@@ -96,10 +98,16 @@ func (b *Eth1Block) PayloadHeader() (*Eth1Header, error) {
 		return nil, err
 	}
 	if b.version >= clparams.CapellaVersion {
-		withdrawalsRoot, err = b.Withdrawals.HashSSZ(16)
+		withdrawalsRoot, err = b.Withdrawals.HashSSZ()
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	var blobGasUsed, excessBlobGas uint64
+	if b.version >= clparams.DenebVersion {
+		blobGasUsed = b.BlobGasUsed
+		excessBlobGas = b.ExcessBlobGas
 	}
 
 	return &Eth1Header{
@@ -118,7 +126,8 @@ func (b *Eth1Block) PayloadHeader() (*Eth1Header, error) {
 		BlockHash:        b.BlockHash,
 		TransactionsRoot: transactionsRoot,
 		WithdrawalsRoot:  withdrawalsRoot,
-		ExcessDataGas:    b.ExcessDataGas,
+		BlobGasUsed:      blobGasUsed,
+		ExcessBlobGas:    excessBlobGas,
 		version:          b.version,
 	}, nil
 }
@@ -126,17 +135,23 @@ func (b *Eth1Block) PayloadHeader() (*Eth1Header, error) {
 // Return minimum required buffer length to be an acceptable SSZ encoding.
 func (b *Eth1Block) EncodingSizeSSZ() (size int) {
 	size = 508
+	if b.Extra == nil {
+		b.Extra = solid.NewExtraData()
+	}
 	// Field (10) 'ExtraData'
-	size += len(b.Extra)
+	size += b.Extra.EncodingSizeSSZ()
 	// Field (13) 'Transactions'
-	size += b.Transactions.EncodingSize()
+	size += b.Transactions.EncodingSizeSSZ()
 
 	if b.version >= clparams.CapellaVersion {
-		size += len(b.Withdrawals)*44 + 4
+		if b.Withdrawals == nil {
+			b.Withdrawals = solid.NewStaticListSSZ[*types.Withdrawal](int(b.beaconCfg.MaxWithdrawalsPerPayload), 44)
+		}
+		size += b.Withdrawals.EncodingSizeSSZ() + 4
 	}
 
 	if b.version >= clparams.DenebVersion {
-		size += 32 // ExcessDataGas
+		size += 8 * 2 // BlobGasUsed + ExcessBlobGas
 	}
 
 	return
@@ -144,131 +159,33 @@ func (b *Eth1Block) EncodingSizeSSZ() (size int) {
 
 // DecodeSSZ decodes the block in SSZ format.
 func (b *Eth1Block) DecodeSSZ(buf []byte, version int) error {
+	b.Extra = solid.NewExtraData()
+	b.Transactions = &solid.TransactionsSSZ{}
+	b.Withdrawals = solid.NewStaticListSSZ[*types.Withdrawal](int(b.beaconCfg.MaxWithdrawalsPerPayload), 44)
 	b.version = clparams.StateVersion(version)
-	if len(buf) < b.EncodingSizeSSZ() {
-		return fmt.Errorf("[Eth1Block] err: %s", ssz.ErrLowBufferSize)
-	}
-	// We can reuse code from eth1-header for partial decoding
-	payloadHeader := Eth1Header{}
-	pos, extraDataOffset := payloadHeader.decodeHeaderMetadataForSSZ(buf)
-	// Set all header shared fields accordingly
-	b.ParentHash = payloadHeader.ParentHash
-	b.FeeRecipient = payloadHeader.FeeRecipient
-	b.StateRoot = payloadHeader.StateRoot
-	b.ReceiptsRoot = payloadHeader.ReceiptsRoot
-	b.BlockHash = payloadHeader.BlockHash
-	b.LogsBloom = payloadHeader.LogsBloom
-	b.PrevRandao = payloadHeader.PrevRandao
-	b.BlockNumber = payloadHeader.BlockNumber
-	b.GasLimit = payloadHeader.GasLimit
-	b.GasUsed = payloadHeader.GasUsed
-	b.Time = payloadHeader.Time
-	b.BaseFeePerGas = payloadHeader.BaseFeePerGas
-	// Decode the rest
-	transactionsOffset := ssz.DecodeOffset(buf[pos:])
-	pos += 4
-	var withdrawalOffset *uint32
-	if version >= int(clparams.CapellaVersion) {
-		withdrawalOffset = new(uint32)
-		*withdrawalOffset = ssz.DecodeOffset(buf[pos:])
-	}
-	pos += 4
-	if version >= int(clparams.DenebVersion) {
-		copy(b.ExcessDataGas[:], buf[pos:])
-	}
-	// Compute extra data.
-	b.Extra = common.CopyBytes(buf[extraDataOffset:transactionsOffset])
-	if len(b.Extra) > 32 {
-		return fmt.Errorf("[Eth1Block] err: Decode(SSZ): Extra data field length should be less or equal to 32, got %d", len(b.Extra))
-	}
-	endOffset := uint32(len(buf))
-	if withdrawalOffset != nil {
-		endOffset = *withdrawalOffset
-	}
-
-	b.Transactions = new(TransactionsSSZ)
-	if err := b.Transactions.DecodeSSZ(buf[transactionsOffset:endOffset], version); err != nil {
-		return err
-	}
-
-	// If withdrawals are enabled, process them.
-	if withdrawalOffset != nil {
-		var err error
-		b.Withdrawals, err = ssz.DecodeStaticList[*types.Withdrawal](buf, *withdrawalOffset, uint32(len(buf)), 44, 16, version)
-		if err != nil {
-			return fmt.Errorf("[Eth1Block] err: %s", err)
-		}
-	}
-
-	return nil
+	return ssz2.UnmarshalSSZ(buf, version, b.getSchema()...)
 }
 
 // EncodeSSZ encodes the block in SSZ format.
 func (b *Eth1Block) EncodeSSZ(dst []byte) ([]byte, error) {
-	buf := dst
-	var err error
-	currentOffset := ssz.BaseExtraDataSSZOffsetBlock
-
-	if b.version >= clparams.CapellaVersion {
-		currentOffset += 4
-	}
-	if b.version >= clparams.DenebVersion {
-		currentOffset += 32
-	}
-	payloadHeader, err := b.PayloadHeader()
-	if err != nil {
-		return nil, err
-	}
-	buf, err = payloadHeader.encodeHeaderMetadataForSSZ(buf, currentOffset)
-	if err != nil {
-		return nil, err
-	}
-	currentOffset += len(b.Extra)
-	// Write transaction offset
-	buf = append(buf, ssz.OffsetSSZ(uint32(currentOffset))...)
-
-	currentOffset += b.Transactions.EncodingSize()
-	// Write withdrawals offset if exist
-	if b.version >= clparams.CapellaVersion {
-		buf = append(buf, ssz.OffsetSSZ(uint32(currentOffset))...)
-		for _, withdrawal := range b.Withdrawals {
-			currentOffset += withdrawal.EncodingSize()
-		}
-	}
-
-	if b.version >= clparams.DenebVersion {
-		buf = append(buf, b.ExcessDataGas[:]...)
-	}
-
-	// Sanity check for extra data then write it.
-	if len(b.Extra) > 32 {
-		return nil, fmt.Errorf("Encode(SSZ): Extra data field length should be less or equal to 32, got %d", len(b.Extra))
-	}
-
-	buf = append(buf, b.Extra...)
-	// Write all tx offsets
-	if buf, err = b.Transactions.EncodeSSZ(buf); err != nil {
-		return nil, err
-	}
-
-	// Append all withdrawals SSZ
-	for _, withdrawal := range b.Withdrawals {
-		buf = append(buf, withdrawal.EncodeSSZ()...)
-	}
-
-	return buf, nil
+	return ssz2.MarshalSSZ(dst, b.getSchema()...)
 }
 
 // HashSSZ calculates the SSZ hash of the Eth1Block's payload header.
 func (b *Eth1Block) HashSSZ() ([32]byte, error) {
-	// Get the payload header.
-	header, err := b.PayloadHeader()
-	if err != nil {
-		return [32]byte{}, err
-	}
+	return merkle_tree.HashTreeRoot(b.getSchema()...)
+}
 
-	// Calculate the SSZ hash of the header and return it.
-	return header.HashSSZ()
+func (b *Eth1Block) getSchema() []interface{} {
+	s := []interface{}{b.ParentHash[:], b.FeeRecipient[:], b.StateRoot[:], b.ReceiptsRoot[:], b.LogsBloom[:],
+		b.PrevRandao[:], &b.BlockNumber, &b.GasLimit, &b.GasUsed, &b.Time, b.Extra, b.BaseFeePerGas[:], b.BlockHash[:], b.Transactions}
+	if b.version >= clparams.CapellaVersion {
+		s = append(s, b.Withdrawals)
+	}
+	if b.version >= clparams.DenebVersion {
+		s = append(s, &b.BlobGasUsed, &b.ExcessBlobGas)
+	}
+	return s
 }
 
 // RlpHeader returns the equivalent types.Header struct with RLP-based fields.
@@ -279,21 +196,17 @@ func (b *Eth1Block) RlpHeader() (*types.Header, error) {
 		reversedBaseFeePerGas[i], reversedBaseFeePerGas[j] = reversedBaseFeePerGas[j], reversedBaseFeePerGas[i]
 	}
 	baseFee := new(big.Int).SetBytes(reversedBaseFeePerGas)
-
 	// If the block version is Capella or later, calculate the withdrawals hash.
 	var withdrawalsHash *libcommon.Hash
 	if b.version >= clparams.CapellaVersion {
 		withdrawalsHash = new(libcommon.Hash)
-		*withdrawalsHash = types.DeriveSha(b.Withdrawals)
-	}
-
-	var excessDataGas *big.Int
-	if b.version >= clparams.DenebVersion {
-		reversedExcessDataGas := libcommon.Copy(b.ExcessDataGas[:])
-		for i, j := 0, len(reversedExcessDataGas)-1; i < j; i, j = i+1, j-1 {
-			reversedExcessDataGas[i], reversedExcessDataGas[j] = reversedExcessDataGas[j], reversedExcessDataGas[i]
-		}
-		excessDataGas = new(big.Int).SetBytes(reversedExcessDataGas)
+		// extract all withdrawals from itearable list
+		withdrawals := make([]*types.Withdrawal, b.Withdrawals.Len())
+		b.Withdrawals.Range(func(idx int, w *types.Withdrawal, _ int) bool {
+			withdrawals[idx] = w
+			return true
+		})
+		*withdrawalsHash = types.DeriveSha(types.Withdrawals(withdrawals))
 	}
 
 	header := &types.Header{
@@ -309,12 +222,18 @@ func (b *Eth1Block) RlpHeader() (*types.Header, error) {
 		GasLimit:        b.GasLimit,
 		GasUsed:         b.GasUsed,
 		Time:            b.Time,
-		Extra:           b.Extra,
+		Extra:           b.Extra.Bytes(),
 		MixDigest:       b.PrevRandao,
 		Nonce:           merge.ProofOfStakeNonce,
 		BaseFee:         baseFee,
 		WithdrawalsHash: withdrawalsHash,
-		ExcessDataGas:   excessDataGas,
+	}
+
+	if b.version >= clparams.DenebVersion {
+		blobGasUsed := b.BlobGasUsed
+		header.BlobGasUsed = &blobGasUsed
+		excessBlobGas := b.ExcessBlobGas
+		header.ExcessBlobGas = &excessBlobGas
 	}
 
 	// If the header hash does not match the block hash, return an error.
@@ -325,10 +244,19 @@ func (b *Eth1Block) RlpHeader() (*types.Header, error) {
 	return header, nil
 }
 
+func (b *Eth1Block) Version() clparams.StateVersion {
+	return b.version
+}
+
 // Body returns the equivalent raw body (only eth1 body section).
 func (b *Eth1Block) Body() *types.RawBody {
+	withdrawals := make([]*types.Withdrawal, b.Withdrawals.Len())
+	b.Withdrawals.Range(func(idx int, w *types.Withdrawal, _ int) bool {
+		withdrawals[idx] = w
+		return true
+	})
 	return &types.RawBody{
 		Transactions: b.Transactions.UnderlyngReference(),
-		Withdrawals:  b.Withdrawals,
+		Withdrawals:  types.Withdrawals(withdrawals),
 	}
 }

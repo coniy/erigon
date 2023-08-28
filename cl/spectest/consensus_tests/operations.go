@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
-	transition2 "github.com/ledgerwatch/erigon/cl/phase1/core/transition"
 
 	"github.com/ledgerwatch/erigon/cl/cltypes"
 	"github.com/ledgerwatch/erigon/spectest"
@@ -39,7 +39,7 @@ func operationAttestationHandler(t *testing.T, root fs.FS, c spectest.TestCase) 
 	if err := spectest.ReadSszOld(root, att, c.Version(), attestationFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessAttestations(preState, cltypes.AttestionListFrom(att), true); err != nil {
+	if err := c.Machine.ProcessAttestations(preState, solid.NewDynamicListSSZFromList([]*solid.Attestation{att}, 128)); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -69,7 +69,7 @@ func operationAttesterSlashingHandler(t *testing.T, root fs.FS, c spectest.TestC
 	if err := spectest.ReadSszOld(root, att, c.Version(), attesterSlashingFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessAttesterSlashing(preState, att); err != nil {
+	if err := c.Machine.ProcessAttesterSlashing(preState, att); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -99,7 +99,7 @@ func operationProposerSlashingHandler(t *testing.T, root fs.FS, c spectest.TestC
 	if err := spectest.ReadSszOld(root, att, c.Version(), proposerSlashingFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessProposerSlashing(preState, att); err != nil {
+	if err := c.Machine.ProcessProposerSlashing(preState, att); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -125,11 +125,11 @@ func operationBlockHeaderHandler(t *testing.T, root fs.FS, c spectest.TestCase) 
 	if err != nil && !expectedError {
 		return err
 	}
-	block := &cltypes.BeaconBlock{}
+	block := cltypes.NewBeaconBlock(&clparams.MainnetBeaconConfig)
 	if err := spectest.ReadSszOld(root, block, c.Version(), blockFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessBlockHeader(preState, block, true); err != nil {
+	if err := c.Machine.ProcessBlockHeader(preState, block); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -159,7 +159,7 @@ func operationDepositHandler(t *testing.T, root fs.FS, c spectest.TestCase) erro
 	if err := spectest.ReadSszOld(root, deposit, c.Version(), depositFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessDeposit(preState, deposit, true); err != nil {
+	if err := c.Machine.ProcessDeposit(preState, deposit); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -189,7 +189,7 @@ func operationSyncAggregateHandler(t *testing.T, root fs.FS, c spectest.TestCase
 	if err := spectest.ReadSszOld(root, agg, c.Version(), syncAggregateFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessSyncAggregate(preState, agg, true); err != nil {
+	if err := c.Machine.ProcessSyncAggregate(preState, agg); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -219,7 +219,7 @@ func operationVoluntaryExitHandler(t *testing.T, root fs.FS, c spectest.TestCase
 	if err := spectest.ReadSszOld(root, vo, c.Version(), voluntaryExitFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessVoluntaryExit(preState, vo, true); err != nil {
+	if err := c.Machine.ProcessVoluntaryExit(preState, vo); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -245,11 +245,11 @@ func operationWithdrawalHandler(t *testing.T, root fs.FS, c spectest.TestCase) e
 	if err != nil && !expectedError {
 		return err
 	}
-	executionPayload := &cltypes.Eth1Block{}
+	executionPayload := cltypes.NewEth1Block(c.Version(), &clparams.MainnetBeaconConfig)
 	if err := spectest.ReadSszOld(root, executionPayload, c.Version(), executionPayloadFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessWithdrawals(preState, executionPayload.Withdrawals, true); err != nil {
+	if err := c.Machine.ProcessWithdrawals(preState, executionPayload.Withdrawals); err != nil {
 		if expectedError {
 			return nil
 		}
@@ -279,7 +279,7 @@ func operationSignedBlsChangeHandler(t *testing.T, root fs.FS, c spectest.TestCa
 	if err := spectest.ReadSszOld(root, change, c.Version(), addressChangeFileName); err != nil {
 		return err
 	}
-	if err := transition2.ProcessBlsToExecutionChange(preState, change, true); err != nil {
+	if err := c.Machine.ProcessBlsToExecutionChange(preState, change); err != nil {
 		if expectedError {
 			return nil
 		}

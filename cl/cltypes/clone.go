@@ -4,24 +4,20 @@ import (
 	"github.com/ledgerwatch/erigon-lib/types/clonable"
 )
 
-func (*SignedBeaconBlock) Clone() clonable.Clonable {
-	return &SignedBeaconBlock{}
+func (s *SignedBeaconBlock) Clone() clonable.Clonable {
+	return NewSignedBeaconBlock(s.Block.Body.beaconCfg)
 }
 
-func (*PendingAttestation) Clone() clonable.Clonable {
-	return &PendingAttestation{}
+func (*IndexedAttestation) Clone() clonable.Clonable {
+	return &IndexedAttestation{}
 }
 
-func (*BeaconBody) Clone() clonable.Clonable {
-	return &BeaconBody{}
+func (b *BeaconBody) Clone() clonable.Clonable {
+	return NewBeaconBody(b.beaconCfg)
 }
 
-func (*Eth1Block) Clone() clonable.Clonable {
-	return &Eth1Block{}
-}
-
-func (*BeaconBlocksByRootRequest) Clone() clonable.Clonable {
-	return &BeaconBlocksByRootRequest{}
+func (e *Eth1Block) Clone() clonable.Clonable {
+	return NewEth1Block(e.version, e.beaconCfg)
 }
 
 func (*Eth1Data) Clone() clonable.Clonable {
@@ -34,10 +30,6 @@ func (*SignedBLSToExecutionChange) Clone() clonable.Clonable {
 
 func (*HistoricalSummary) Clone() clonable.Clonable {
 	return &HistoricalSummary{}
-}
-
-func (*Validator) Clone() clonable.Clonable {
-	return &Validator{}
 }
 
 func (*DepositData) Clone() clonable.Clonable {
@@ -80,8 +72,8 @@ func (*Deposit) Clone() clonable.Clonable {
 	return &Deposit{}
 }
 
-func (*BeaconBlock) Clone() clonable.Clonable {
-	return &BeaconBlock{}
+func (b *BeaconBlock) Clone() clonable.Clonable {
+	return NewBeaconBlock(b.Body.beaconCfg)
 }
 
 func (*AggregateAndProof) Clone() clonable.Clonable {
@@ -100,23 +92,8 @@ func (*SignedBeaconBlockHeader) Clone() clonable.Clonable {
 	return &SignedBeaconBlockHeader{}
 }
 
-func (*SyncCommittee) Clone() clonable.Clonable {
-	return &SyncCommittee{}
-}
 func (*Fork) Clone() clonable.Clonable {
 	return &Fork{}
-}
-
-func (*BlobSideCar) Clone() clonable.Clonable {
-	return &BlobSideCar{}
-}
-
-func (*SignedBlobSideCar) Clone() clonable.Clonable {
-	return &SignedBlobSideCar{}
-}
-
-func (*BlobIdentifier) Clone() clonable.Clonable {
-	return &BlobIdentifier{}
 }
 
 func (*KZGCommitment) Clone() clonable.Clonable {

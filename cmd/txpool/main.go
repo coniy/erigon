@@ -86,13 +86,7 @@ var rootCmd = &cobra.Command{
 		debug.Exit()
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		var logger log.Logger
-		var err error
-		if logger, err = debug.SetupCobra(cmd, "txpool"); err != nil {
-			logger.Error("Setting up", "error", err)
-			return
-		}
-
+		logger := debug.SetupCobra(cmd, "integration")
 		if err := doTxpool(cmd.Context(), logger); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				log.Error(err.Error())
@@ -172,7 +166,7 @@ func doTxpool(ctx context.Context, logger log.Logger) error {
 			ethashApi = casted.APIs(nil)[1].Service.(*ethash.API)
 		}
 	*/
-	miningGrpcServer := privateapi.NewMiningServer(ctx, &rpcdaemontest.IsMiningMock{}, nil)
+	miningGrpcServer := privateapi.NewMiningServer(ctx, &rpcdaemontest.IsMiningMock{}, nil, logger)
 
 	grpcServer, err := txpool.StartGrpc(txpoolGrpcServer, miningGrpcServer, txpoolApiAddr, nil, logger)
 	if err != nil {

@@ -6,18 +6,17 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
-	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	"github.com/ledgerwatch/erigon-lib/state"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/rawdb"
+	"github.com/ledgerwatch/erigon/core/rawdb/blockio"
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
 	"github.com/ledgerwatch/erigon/eth/stagedsync/stages"
 	"github.com/ledgerwatch/erigon/turbo/backup"
 	"github.com/ledgerwatch/erigon/turbo/services"
-	"github.com/ledgerwatch/erigon/turbo/snapshotsync"
 	"github.com/ledgerwatch/log/v3"
 )
 
@@ -51,7 +50,8 @@ func ResetState(db kv.RwDB, ctx context.Context, chain string, tmpDir string) er
 	return nil
 }
 
-func ResetBlocks(tx kv.RwTx, db kv.RoDB, snapshots *snapshotsync.RoSnapshots, agg *state.AggregatorV3, br services.FullBlockReader, dirs datadir.Dirs, cc chain.Config, engine consensus.Engine) error {
+func ResetBlocks(tx kv.RwTx, db kv.RoDB, agg *state.AggregatorV3,
+	br services.FullBlockReader, bw *blockio.BlockWriter, dirs datadir.Dirs, cc chain.Config, engine consensus.Engine, logger log.Logger) error {
 	// keep Genesis
 	if err := rawdb.TruncateBlocks(context.Background(), tx, 1); err != nil {
 		return err
@@ -82,43 +82,33 @@ func ResetBlocks(tx kv.RwTx, db kv.RoDB, snapshots *snapshotsync.RoSnapshots, ag
 	}
 
 	// ensure no garbage records left (it may happen if db is inconsistent)
-	if err := tx.ForEach(kv.BlockBody, hexutility.EncodeTs(2), func(k, _ []byte) error { return tx.Delete(kv.BlockBody, k) }); err != nil {
-		return err
-	}
-	ethtx := kv.EthTx
-	transactionV3, err := kvcfg.TransactionsV3.Enabled(tx)
-	if err != nil {
-		panic(err)
-	}
-	if transactionV3 {
-		ethtx = kv.EthTxV3
-	}
-
-	if err := backup.ClearTables(context.Background(), db, tx,
-		kv.NonCanonicalTxs,
-		ethtx,
-		kv.MaxTxNum,
-	); err != nil {
-		return err
-	}
-	if err := rawdb.ResetSequence(tx, ethtx, 0); err != nil {
-		return err
-	}
-	if err := rawdb.ResetSequence(tx, kv.NonCanonicalTxs, 0); err != nil {
+	if err := bw.TruncateBodies(db, tx, 2); err != nil {
 		return err
 	}
 
-	if snapshots != nil && snapshots.Cfg().Enabled && snapshots.BlocksAvailable() > 0 {
-		if err := stagedsync.FillDBFromSnapshots("fillind_db_from_snapshots", context.Background(), tx, dirs, snapshots, br, cc, engine, agg); err != nil {
+	if br.FreezingCfg().Enabled && br.FrozenBlocks() > 0 {
+		if err := stagedsync.FillDBFromSnapshots("fillind_db_from_snapshots", context.Background(), tx, dirs, br, agg, logger); err != nil {
 			return err
 		}
-		_ = stages.SaveStageProgress(tx, stages.Snapshots, snapshots.BlocksAvailable())
-		_ = stages.SaveStageProgress(tx, stages.Headers, snapshots.BlocksAvailable())
-		_ = stages.SaveStageProgress(tx, stages.Bodies, snapshots.BlocksAvailable())
-		_ = stages.SaveStageProgress(tx, stages.Senders, snapshots.BlocksAvailable())
+		_ = stages.SaveStageProgress(tx, stages.Snapshots, br.FrozenBlocks())
+		_ = stages.SaveStageProgress(tx, stages.Headers, br.FrozenBlocks())
+		_ = stages.SaveStageProgress(tx, stages.Bodies, br.FrozenBlocks())
+		_ = stages.SaveStageProgress(tx, stages.Senders, br.FrozenBlocks())
 	}
 
 	return nil
+}
+func ResetBorHeimdall(ctx context.Context, tx kv.RwTx) error {
+	if err := tx.ClearBucket(kv.BorEventNums); err != nil {
+		return err
+	}
+	if err := tx.ClearBucket(kv.BorEvents); err != nil {
+		return err
+	}
+	if err := tx.ClearBucket(kv.BorSpans); err != nil {
+		return err
+	}
+	return clearStageProgress(tx, stages.BorHeimdall)
 }
 func ResetSenders(ctx context.Context, db kv.RwDB, tx kv.RwTx) error {
 	if err := backup.ClearTables(ctx, db, tx, kv.Senders); err != nil {
@@ -193,8 +183,8 @@ var Tables = map[stages.SyncStage][]string{
 	stages.IntermediateHashes:  {kv.TrieOfAccounts, kv.TrieOfStorage},
 	stages.CallTraces:          {kv.CallFromIndex, kv.CallToIndex},
 	stages.LogIndex:            {kv.LogAddressIndex, kv.LogTopicIndex},
-	stages.AccountHistoryIndex: {kv.AccountsHistory},
-	stages.StorageHistoryIndex: {kv.StorageHistory},
+	stages.AccountHistoryIndex: {kv.E2AccountsHistory},
+	stages.StorageHistoryIndex: {kv.E2StorageHistory},
 	stages.Finish:              {},
 }
 var stateBuckets = []string{
@@ -210,20 +200,20 @@ var stateHistoryBuckets = []string{
 	kv.CallTraceSet,
 }
 var stateHistoryV3Buckets = []string{
-	kv.AccountHistoryKeys, kv.AccountIdx, kv.AccountHistoryVals,
-	kv.StorageKeys, kv.StorageVals, kv.StorageHistoryKeys, kv.StorageHistoryVals, kv.StorageIdx,
-	kv.CodeKeys, kv.CodeVals, kv.CodeHistoryKeys, kv.CodeHistoryVals, kv.CodeIdx,
-	kv.AccountHistoryKeys, kv.AccountIdx, kv.AccountHistoryVals,
-	kv.StorageHistoryKeys, kv.StorageIdx, kv.StorageHistoryVals,
-	kv.CodeHistoryKeys, kv.CodeIdx, kv.CodeHistoryVals,
-	kv.LogAddressKeys, kv.LogAddressIdx,
-	kv.LogTopicsKeys, kv.LogTopicsIdx,
-	kv.TracesFromKeys, kv.TracesFromIdx,
-	kv.TracesToKeys, kv.TracesToIdx,
+	kv.TblAccountHistoryKeys, kv.TblAccountIdx, kv.TblAccountHistoryVals,
+	kv.TblStorageKeys, kv.TblStorageVals, kv.TblStorageHistoryKeys, kv.TblStorageHistoryVals, kv.TblStorageIdx,
+	kv.TblCodeKeys, kv.TblCodeVals, kv.TblCodeHistoryKeys, kv.TblCodeHistoryVals, kv.TblCodeIdx,
+	kv.TblAccountHistoryKeys, kv.TblAccountIdx, kv.TblAccountHistoryVals,
+	kv.TblStorageHistoryKeys, kv.TblStorageIdx, kv.TblStorageHistoryVals,
+	kv.TblCodeHistoryKeys, kv.TblCodeIdx, kv.TblCodeHistoryVals,
+	kv.TblLogAddressKeys, kv.TblLogAddressIdx,
+	kv.TblLogTopicsKeys, kv.TblLogTopicsIdx,
+	kv.TblTracesFromKeys, kv.TblTracesFromIdx,
+	kv.TblTracesToKeys, kv.TblTracesToIdx,
 }
 var stateHistoryV4Buckets = []string{
-	kv.AccountKeys, kv.StorageKeys, kv.CodeKeys,
-	kv.CommitmentKeys, kv.CommitmentVals, kv.CommitmentHistoryKeys, kv.CommitmentHistoryVals, kv.CommitmentIdx,
+	kv.TblAccountKeys, kv.TblStorageKeys, kv.TblCodeKeys,
+	kv.TblCommitmentKeys, kv.TblCommitmentVals, kv.TblCommitmentHistoryKeys, kv.TblCommitmentHistoryVals, kv.TblCommitmentIdx,
 }
 
 func clearStageProgress(tx kv.RwTx, stagesList ...stages.SyncStage) error {

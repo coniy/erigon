@@ -247,7 +247,7 @@ func (r *Receipt) DecodeRLP(s *rlp.Stream) error {
 		}
 		r.Type = b[0]
 		switch r.Type {
-		case AccessListTxType, DynamicFeeTxType:
+		case AccessListTxType, DynamicFeeTxType, BlobTxType:
 			if err := r.decodePayload(s); err != nil {
 				return err
 			}
@@ -445,7 +445,9 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 		}
 	case BlobTxType:
 		w.WriteByte(BlobTxType)
-		rlp.Encode(w, data)
+		if err := rlp.Encode(w, data); err != nil {
+			panic(err)
+		}
 	default:
 		// For unsupported types, write nothing. Since this is for
 		// DeriveSha, the error will be caught matching the derived hash
@@ -463,6 +465,8 @@ func (r Receipts) DeriveFields(hash libcommon.Hash, number uint64, txs Transacti
 	if len(senders) != len(txs) {
 		return fmt.Errorf("transaction and senders count mismatch, tx count = %d, senders count = %d", len(txs), len(senders))
 	}
+
+	blockNumber := new(big.Int).SetUint64(number)
 	for i := 0; i < len(r); i++ {
 		// The transaction type and hash can be retrieved from the transaction itself
 		r[i].Type = txs[i].Type()
@@ -470,7 +474,7 @@ func (r Receipts) DeriveFields(hash libcommon.Hash, number uint64, txs Transacti
 
 		// block location fields
 		r[i].BlockHash = hash
-		r[i].BlockNumber = new(big.Int).SetUint64(number)
+		r[i].BlockNumber = blockNumber
 		r[i].TransactionIndex = uint(i)
 
 		// The contract address can be derived from the transaction itself

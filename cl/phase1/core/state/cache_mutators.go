@@ -5,19 +5,19 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/common/math"
 	"github.com/ledgerwatch/erigon/cl/clparams"
-	"github.com/ledgerwatch/erigon/cl/cltypes"
+	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
 	"github.com/ledgerwatch/erigon/cl/utils"
 )
 
-func (b *BeaconState) getSlashingProposerReward(whistleBlowerReward uint64) uint64 {
+func (b *CachingBeaconState) getSlashingProposerReward(whistleBlowerReward uint64) uint64 {
 	if b.Version() == clparams.Phase0Version {
 		return whistleBlowerReward / b.BeaconConfig().ProposerRewardQuotient
 	}
 	return whistleBlowerReward * b.BeaconConfig().ProposerWeight / b.BeaconConfig().WeightDenominator
 }
 
-func (b *BeaconState) SlashValidator(slashedInd uint64, whistleblowerInd *uint64) error {
-	epoch := Epoch(b.BeaconState)
+func (b *CachingBeaconState) SlashValidator(slashedInd uint64, whistleblowerInd *uint64) error {
+	epoch := Epoch(b)
 	if err := b.InitiateValidatorExit(slashedInd); err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func (b *BeaconState) SlashValidator(slashedInd uint64, whistleblowerInd *uint64
 	}
 
 	newWithdrawableEpoch := utils.Max64(currentWithdrawableEpoch, epoch+b.BeaconConfig().EpochsPerSlashingsVector)
-	if err := b.SetValidatorWithdrawableEpoch(int(slashedInd), newWithdrawableEpoch); err != nil {
+	if err := b.SetWithdrawableEpochForValidatorAtIndex(int(slashedInd), newWithdrawableEpoch); err != nil {
 		return err
 	}
 
@@ -49,7 +49,7 @@ func (b *BeaconState) SlashValidator(slashedInd uint64, whistleblowerInd *uint64
 	if err != nil {
 		return err
 	}
-	if err := DecreaseBalance(b.BeaconState, slashedInd, newEffectiveBalance/b.BeaconConfig().GetMinSlashingPenaltyQuotient(b.Version())); err != nil {
+	if err := DecreaseBalance(b, slashedInd, newEffectiveBalance/b.BeaconConfig().GetMinSlashingPenaltyQuotient(b.Version())); err != nil {
 		return err
 	}
 	proposerInd, err := b.GetBeaconProposerIndex()
@@ -62,13 +62,13 @@ func (b *BeaconState) SlashValidator(slashedInd uint64, whistleblowerInd *uint64
 	}
 	whistleBlowerReward := newEffectiveBalance / b.BeaconConfig().WhistleBlowerRewardQuotient
 	proposerReward := b.getSlashingProposerReward(whistleBlowerReward)
-	if err := IncreaseBalance(b.BeaconState, proposerInd, proposerReward); err != nil {
+	if err := IncreaseBalance(b, proposerInd, proposerReward); err != nil {
 		return err
 	}
-	return IncreaseBalance(b.BeaconState, *whistleblowerInd, whistleBlowerReward-proposerReward)
+	return IncreaseBalance(b, *whistleblowerInd, whistleBlowerReward-proposerReward)
 }
 
-func (b *BeaconState) InitiateValidatorExit(index uint64) error {
+func (b *CachingBeaconState) InitiateValidatorExit(index uint64) error {
 	validatorExitEpoch, err := b.ValidatorExitEpoch(int(index))
 	if err != nil {
 		return err
@@ -77,9 +77,9 @@ func (b *BeaconState) InitiateValidatorExit(index uint64) error {
 		return nil
 	}
 
-	currentEpoch := Epoch(b.BeaconState)
+	currentEpoch := Epoch(b)
 	exitQueueEpoch := ComputeActivationExitEpoch(b.BeaconConfig(), currentEpoch)
-	b.ForEachValidator(func(v *cltypes.Validator, idx, total int) bool {
+	b.ForEachValidator(func(v solid.Validator, idx, total int) bool {
 		if v.ExitEpoch() != b.BeaconConfig().FarFutureEpoch && v.ExitEpoch() > exitQueueEpoch {
 			exitQueueEpoch = v.ExitEpoch()
 		}
@@ -87,7 +87,7 @@ func (b *BeaconState) InitiateValidatorExit(index uint64) error {
 	})
 
 	exitQueueChurn := 0
-	b.ForEachValidator(func(v *cltypes.Validator, idx, total int) bool {
+	b.ForEachValidator(func(v solid.Validator, idx, total int) bool {
 		if v.ExitEpoch() == exitQueueEpoch {
 			exitQueueChurn += 1
 		}

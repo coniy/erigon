@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/pelletier/go-toml"
@@ -47,7 +48,8 @@ func runErigon(cliCtx *cli.Context) error {
 	configFilePath := cliCtx.String(utils.ConfigFlag.Name)
 	if configFilePath != "" {
 		if err := setFlagsFromConfigFile(cliCtx, configFilePath); err != nil {
-			log.Warn("failed setting config flags from yaml/toml file", "err", err)
+			log.Error("failed setting config flags from yaml/toml file", "err", err)
+			return err
 		}
 	}
 
@@ -58,7 +60,10 @@ func runErigon(cliCtx *cli.Context) error {
 	}
 
 	// initializing the node and providing the current git commit there
+
 	logger.Info("Build info", "git_branch", params.GitBranch, "git_tag", params.GitTag, "git_commit", params.GitCommit)
+	erigonInfoGauge := metrics.GetOrCreateCounter(fmt.Sprintf(`erigon_info{version="%s",commit="%s"}`, params.Version, params.GitCommit))
+	erigonInfoGauge.Set(1)
 
 	nodeCfg := node.NewNodConfigUrfave(cliCtx, logger)
 	ethCfg := node.NewEthConfigUrfave(cliCtx, nodeCfg, logger)

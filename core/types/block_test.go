@@ -115,12 +115,12 @@ func TestEIP1559BlockEncoding(t *testing.T) {
 	feeCap, _ := uint256.FromBig(block.BaseFee())
 	var tx2 Transaction = &DynamicFeeTransaction{
 		CommonTx: CommonTx{
-			ChainID: u256.Num1,
-			Nonce:   0,
-			To:      &to,
-			Gas:     123457,
-			Data:    []byte{},
+			Nonce: 0,
+			To:    &to,
+			Gas:   123457,
+			Data:  []byte{},
 		},
+		ChainID:    u256.Num1,
 		FeeCap:     feeCap,
 		Tip:        u256.Num0,
 		AccessList: accesses,
@@ -485,4 +485,30 @@ func TestBlockRawBodyPostShanghaiWithdrawals(t *testing.T) {
 	require.Equal(1, len(body.Uncles))
 	require.Equal(0, len(body.Transactions))
 	require.Equal(2, len(body.Withdrawals))
+}
+
+func TestCopyTxs(t *testing.T) {
+	var txs Transactions
+	txs = append(txs, &LegacyTx{
+		CommonTx: CommonTx{
+			Nonce: 0,
+			Value: new(uint256.Int).SetUint64(10000),
+			Gas:   50000,
+			Data:  []byte("Sparta"),
+		},
+		GasPrice: new(uint256.Int).SetUint64(10),
+	})
+
+	populateBlobTxs()
+	for _, tx := range dummyBlobTxs {
+		txs = append(txs, tx)
+	}
+
+	populateBlobWrapperTxs()
+	for _, tx := range dummyBlobWrapperTxs {
+		txs = append(txs, tx)
+	}
+
+	copies := CopyTxs(txs)
+	assert.Equal(t, txs, copies)
 }

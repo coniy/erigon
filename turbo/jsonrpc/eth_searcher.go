@@ -1,4 +1,4 @@
-package commands
+package jsonrpc
 
 import (
 	"context"
@@ -235,7 +235,7 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 		}
 	}
 
-	singer := types.MakeSigner(config, header.Number.Uint64())
+	singer := types.MakeSigner(config, header.Number.Uint64(), header.Time)
 	msg, err := tx.AsMessage(*singer, header.BaseFee, rules)
 	if err != nil {
 		return nil, err

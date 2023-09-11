@@ -3,6 +3,7 @@ package caplin1
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path"
 	"time"
 
@@ -62,7 +63,9 @@ func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient,
 	gossipManager := network.NewGossipReceiver(sentinel, forkChoice, beaconConfig, genesisConfig, caplinFreezer)
 	dataDirFs := afero.NewBasePathFs(afero.NewOsFs(), dirs.DataDir)
 	dataDirIndexer := path.Join(dirs.DataDir, "beacon_indicies")
-	db, err := sql.Open("sqlite3", dataDirIndexer)
+
+	os.Remove(dataDirIndexer)
+	db, err := sql.Open("sqlite", dataDirIndexer)
 	if err != nil {
 		return err
 	}
@@ -102,10 +105,10 @@ func RunCaplinPhase1(ctx context.Context, sentinel sentinel.SentinelClient,
 			}
 		}()
 	}
-	beaconDB := persistence.NewbeaconChainDatabaseFilesystem(afero.NewBasePathFs(dataDirFs, dirs.DataDir), engine, haveDatabaseConfig.FullBlocks, beaconConfig, db)
+	beaconDB := persistence.NewBeaconChainDatabaseFilesystem(afero.NewBasePathFs(dataDirFs, dirs.DataDir), engine, haveDatabaseConfig.FullBlocks, beaconConfig, db)
 
 	if cfg.Active {
-		apiHandler := handler.NewApiHandler(genesisConfig, beaconConfig, beaconDB, db)
+		apiHandler := handler.NewApiHandler(genesisConfig, beaconConfig, beaconDB, db, forkChoice)
 		go beacon.ListenAndServe(apiHandler, &cfg)
 		log.Info("Beacon API started", "addr", cfg.Address)
 	}

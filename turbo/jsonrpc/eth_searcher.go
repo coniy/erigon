@@ -390,6 +390,9 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		Coinbase:   parent.Coinbase,
 		BaseFee:    new(big.Int).Set(parent.BaseFee),
 	}
+	if chainConfig.IsLondon(parent.Number.Uint64()) {
+		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
+	}
 	// header overrides
 	args.BlockOverrides.Apply(header)
 
@@ -455,7 +458,9 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		}
 
 		// Create a new EVM environment
-		vmConfig := vm.Config{NoBaseFee: true}
+		vmConfig := vm.Config{
+			NoBaseFee: !args.EnableBaseFee,
+		}
 		var tracer tracers.Tracer
 		if args.EnableCallTracer {
 			tracer, err = tracers.New("callTracer", nil, json.RawMessage(`{"withLog":true}`))

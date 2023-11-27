@@ -125,10 +125,36 @@ type CallMsg struct {
 	GasFeeCap *big.Int         `json:"gasFeeCap,omitempty"`
 	GasTipCap *big.Int         `json:"gasTipCap,omitempty"`
 	Value     *big.Int         `json:"value,omitempty"`
-	Nonce     uint64           `json:"nonce,omitempty"` // transaction returned nonce
+	Nonce     *uint64          `json:"nonce,omitempty"`
 	Data      hexutility.Bytes `json:"data,omitempty"`
 
 	// Introduced by AccessListTxType transaction.
+	AccessList       types2.AccessList `json:"accessList,omitempty"`
+	EnableAccessList bool              `json:"enableAccessList,omitempty"`
+}
+
+type CallArgs struct {
+	Txs                    []*CallMsg            `json:"txs,omitempty"`
+	StateBlockNumberOrHash rpc.BlockNumberOrHash `json:"stateBlockNumber,omitempty"`
+	Timeout                *int64                `json:"timeout,omitempty"`
+	EnableBaseFee          bool                  `json:"enableBaseFee,omitempty"`
+	EnableCallTracer       bool                  `json:"enableCallTracer,omitempty"`
+	BlockOverrides         *BlockOverrides       `json:"blockOverrides,omitempty"`
+	StateOverrides         *StateOverride        `json:"stateOverrides,omitempty"`
+}
+
+type CallResult struct {
+	StateBlockNumber int64       `json:"stateBlockNumber,omitempty"`
+	TotalGasUsed     uint64      `json:"totalGasUsed,omitempty"`
+	Txs              []*TxResult `json:"txs,omitempty"`
+}
+
+type TxResult struct {
+	GasUsed    uint64            `json:"gasUsed,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	ReturnData hexutility.Bytes  `json:"returnData,omitempty"`
+	Logs       []*types.Log      `json:"logs,omitempty"`
+	CallFrame  *CallFrame        `json:"callFrame,omitempty"`
 	AccessList types2.AccessList `json:"accessList,omitempty"`
 }
 
@@ -137,6 +163,7 @@ type CallBundleArgs struct {
 	StateBlockNumberOrHash rpc.BlockNumberOrHash `json:"stateBlockNumber,omitempty"`
 	Timeout                *int64                `json:"timeout,omitempty"`
 	EnableCallTracer       bool                  `json:"enableCallTracer,omitempty"`
+	EnableAccessList       bool                  `json:"enableAccessList,omitempty"`
 	BlockOverrides         *BlockOverrides       `json:"blockOverrides,omitempty"`
 	StateOverrides         *StateOverride        `json:"stateOverrides,omitempty"`
 }
@@ -153,58 +180,45 @@ type CallBundleResult struct {
 }
 
 type BundleTxResult struct {
-	TxHash            common.Hash      `json:"txHash,omitempty"`
-	GasUsed           uint64           `json:"gasUsed,omitempty"`
-	Error             string           `json:"error,omitempty"`
-	ReturnData        hexutility.Bytes `json:"returnData,omitempty"`
-	Logs              []*types.Log     `json:"logs,omitempty"`
-	CoinbaseDiff      *big.Int         `json:"coinbaseDiff,omitempty"`
-	GasFees           *big.Int         `json:"gasFees,omitempty"`
-	EthSentToCoinbase *big.Int         `json:"ethSentToCoinbase,omitempty"`
-	GasPrice          *big.Int         `json:"gasPrice,omitempty"`
-	CallMsg           *CallMsg         `json:"callMsg,omitempty"`
-	CallFrame         *CallFrame       `json:"callFrame,omitempty"`
-}
-
-type CallArgs struct {
-	Txs                    []*CallMsg            `json:"txs,omitempty"`
-	StateBlockNumberOrHash rpc.BlockNumberOrHash `json:"stateBlockNumber,omitempty"`
-	Timeout                *int64                `json:"timeout,omitempty"`
-	EnableCallTracer       bool                  `json:"enableCallTracer,omitempty"`
-	EnableBaseFee          bool                  `json:"enableBaseFee,omitempty"`
-	BlockOverrides         *BlockOverrides       `json:"blockOverrides,omitempty"`
-	StateOverrides         *StateOverride        `json:"stateOverrides,omitempty"`
-}
-
-type CallResult struct {
-	StateBlockNumber int64       `json:"stateBlockNumber,omitempty"`
-	TotalGasUsed     uint64      `json:"totalGasUsed,omitempty"`
-	Txs              []*TxResult `json:"txs,omitempty"`
-}
-
-type TxResult struct {
-	GasUsed    uint64           `json:"gasUsed,omitempty"`
-	Error      string           `json:"error,omitempty"`
-	ReturnData hexutility.Bytes `json:"returnData,omitempty"`
-	Logs       []*types.Log     `json:"logs,omitempty"`
-	CallFrame  *CallFrame       `json:"callFrame,omitempty"`
+	TxHash            common.Hash       `json:"txHash,omitempty"`
+	GasUsed           uint64            `json:"gasUsed,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	ReturnData        hexutility.Bytes  `json:"returnData,omitempty"`
+	Logs              []*types.Log      `json:"logs,omitempty"`
+	CoinbaseDiff      *big.Int          `json:"coinbaseDiff,omitempty"`
+	GasFees           *big.Int          `json:"gasFees,omitempty"`
+	EthSentToCoinbase *big.Int          `json:"ethSentToCoinbase,omitempty"`
+	GasPrice          *big.Int          `json:"gasPrice,omitempty"`
+	CallMsg           *CallMsg          `json:"callMsg,omitempty"`
+	CallFrame         *CallFrame        `json:"callFrame,omitempty"`
+	AccessList        types2.AccessList `json:"accessList,omitempty"`
 }
 
 type CallType string
+
+const (
+	CallTypeCall         = "CALL"
+	CallTypeCallCode     = "CALLCODE"
+	CallTypeStaticCall   = "STATICCALL"
+	CallTypeCreate       = "CREATE"
+	CallTypeCreate2      = "CREATE2"
+	CallTypeSelfDestruct = "SELFDESTRUCT"
+	CallTypeDelegateCall = "DELEGATECALL"
+)
 
 type CallFrame struct {
 	Type         CallType         `json:"type,omitempty"`
 	From         common.Address   `json:"from,omitempty"`
 	To           common.Address   `json:"to,omitempty"`
+	Value        *hexutil.Big     `json:"value,omitempty"`
 	Gas          hexutil.Uint64   `json:"gas,omitempty"`
 	GasUsed      hexutil.Uint64   `json:"gasUsed,omitempty"`
-	Input        hexutility.Bytes `json:"input,omitempty"`
-	Output       hexutility.Bytes `json:"output,omitempty"`
 	Error        string           `json:"error,omitempty"`
 	RevertReason string           `json:"revertReason,omitempty"`
+	Input        hexutility.Bytes `json:"input,omitempty"`
+	Output       hexutility.Bytes `json:"output,omitempty"`
 	Calls        []*CallFrame     `json:"calls,omitempty"`
 	Logs         []*CallLog       `json:"logs,omitempty"`
-	Value        *hexutil.Big     `json:"value,omitempty"`
 
 	Parent *CallFrame `json:"-"`
 }

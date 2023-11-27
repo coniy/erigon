@@ -3,7 +3,6 @@ package jsonrpc
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/holiman/uint256"
@@ -19,7 +18,6 @@ import (
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/eth/tracers"
 	"github.com/ledgerwatch/erigon/rpc"
 	"github.com/ledgerwatch/erigon/searcher"
 	"github.com/ledgerwatch/erigon/turbo/adapter/ethapi"
@@ -90,246 +88,6 @@ func (api *APIImpl) SearcherChainData(ctx context.Context, args searcher.ChainDa
 	return res, nil
 }
 
-func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBundleArgs) (*searcher.CallBundleResult, error) {
-	if len(args.Txs) == 0 {
-		return nil, errors.New("missing txs")
-	}
-	if args.StateBlockNumberOrHash == (rpc.BlockNumberOrHash{}) {
-		args.StateBlockNumberOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
-	}
-	timeoutMS := int64(5000)
-	if args.Timeout != nil {
-		timeoutMS = *args.Timeout
-	}
-	timeout := time.Millisecond * time.Duration(timeoutMS)
-
-	var txs types.Transactions
-	for _, encodedTx := range args.Txs {
-		tx, err := types.DecodeWrappedTransaction(encodedTx)
-		if err != nil {
-			return nil, err
-		}
-		txs = append(txs, tx)
-	}
-
-	dbtx, err := api.db.BeginRo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("create ro transaction: %v", err)
-	}
-	defer dbtx.Rollback()
-
-	chainConfig, err := api.chainConfig(dbtx)
-	if err != nil {
-		return nil, fmt.Errorf("read chain config: %v", err)
-	}
-	engine := api.engine()
-
-	blockNumber, hash, _, err := rpchelper.GetBlockNumber(args.StateBlockNumberOrHash, dbtx, api.filters)
-	if err != nil {
-		return nil, err
-	}
-
-	stateReader, err := rpchelper.CreateStateReader(ctx, dbtx, args.StateBlockNumberOrHash, 0, api.filters, api.stateCache, api.historyV3(dbtx), chainConfig.ChainName)
-	if err != nil {
-		return nil, fmt.Errorf("create state reader: %v", err)
-	}
-	ibs := state.New(stateReader)
-
-	// override state
-	if args.StateOverrides != nil {
-		err = args.StateOverrides.Apply(ibs)
-		if err != nil {
-			return nil, fmt.Errorf("override state: %v", err)
-		}
-	}
-
-	parent, err := api._blockReader.Header(context.Background(), dbtx, hash, blockNumber)
-	if err != nil {
-		return nil, fmt.Errorf("could not fetch header %d(%x): %v", blockNumber, hash, err)
-	}
-	if parent == nil {
-		return nil, fmt.Errorf("block %d(%x) not found", blockNumber, hash)
-	}
-	header := &types.Header{
-		ParentHash: parent.Hash(),
-		Number:     new(big.Int).Set(parent.Number),
-		GasLimit:   parent.GasLimit,
-		Time:       parent.Time,
-		Difficulty: new(big.Int).Set(parent.Difficulty),
-		Coinbase:   parent.Coinbase,
-		BaseFee:    new(big.Int).Set(parent.BaseFee),
-	}
-	if chainConfig.IsLondon(parent.Number.Uint64()) {
-		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
-	}
-	// header overrides
-	args.BlockOverrides.Apply(header)
-
-	// Gas pool
-	gp := new(core.GasPool).AddGas(math.MaxUint64)
-
-	blockContext := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
-	blockHash := parent.Hash()
-	rules := chainConfig.Rules(parent.Number.Uint64(), blockContext.Time)
-
-	bundleHash := sha3.NewLegacyKeccak256()
-	// Setup context so it may be cancelled when the call
-	// has completed or, in case of unmetered gas, setup
-	// a context with a timeout
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-	} else {
-		ctx, cancel = context.WithCancel(ctx)
-	}
-	// Make sure the context is cancelled when the call has completed
-	// This makes sure resources are cleaned up
-	defer cancel()
-
-	// Feed each of the transactions into the VM ctx
-	// And try and estimate the gas used
-	ret := &searcher.CallBundleResult{
-		CoinbaseDiff:      ibs.GetBalance(header.Coinbase).ToBig(),
-		GasFees:           new(big.Int),
-		EthSentToCoinbase: new(big.Int),
-		StateBlockNumber:  parent.Number.Int64(),
-		Txs:               make([]*searcher.BundleTxResult, 0, len(txs)),
-	}
-	for i, tx := range txs {
-		// Check if the context was cancelled (eg. timed-out)
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		ibs.SetTxContext(tx.Hash(), blockHash, i)
-		txResult, err := api.applyTransactionWithResult(chainConfig, blockContext, rules, gp, ibs, header, tx, args.EnableCallTracer)
-		if err != nil {
-			return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
-		}
-		bundleHash.Write(tx.Hash().Bytes())
-		ret.TotalGasUsed += txResult.GasUsed
-		ret.GasFees.Add(ret.GasFees, txResult.GasFees)
-		ret.Txs = append(ret.Txs, txResult)
-	}
-
-	ret.CoinbaseDiff = new(big.Int).Sub(ibs.GetBalance(header.Coinbase).ToBig(), ret.CoinbaseDiff)
-	ret.EthSentToCoinbase = new(big.Int).Sub(ret.CoinbaseDiff, ret.GasFees)
-	ret.BundleGasPrice = new(big.Int).Div(ret.CoinbaseDiff, big.NewInt(int64(ret.TotalGasUsed)))
-	ret.BundleHash = common.BytesToHash(bundleHash.Sum(nil))
-
-	return ret, nil
-}
-
-func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContext evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, ibs *state.IntraBlockState, header *types.Header, tx types.Transaction, enableCallTracer bool) (*searcher.BundleTxResult, error) {
-	var tracer tracers.Tracer
-	var vmConfig vm.Config
-	if enableCallTracer {
-		var err error
-		tracer, err = tracers.New("callTracer", nil, json.RawMessage(`{"withLog":true}`))
-		if err != nil {
-			return nil, err
-		}
-		vmConfig = vm.Config{
-			Tracer: tracer,
-			Debug:  true,
-		}
-	}
-
-	singer := types.MakeSigner(config, header.Number.Uint64(), header.Time)
-	msg, err := tx.AsMessage(*singer, header.BaseFee, rules)
-	if err != nil {
-		return nil, err
-	}
-	// Create a new context to be used in the EVM environment
-	evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), ibs, config, vmConfig)
-
-	// Apply the transaction to the current state (included in the env).
-	coinbaseBalanceBeforeTx := ibs.GetBalance(header.Coinbase)
-	result, err := core.ApplyMessage(evm, msg, gp, true, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update the state with pending changes
-	if err = ibs.FinalizeTx(rules, state.NewNoopWriter()); err != nil {
-		return nil, err
-	}
-	header.GasUsed += result.UsedGas
-
-	// Create a new receipt for the transaction, storing the intermediate root and gas used
-	// by the tx.
-	receipt := &types.Receipt{Type: tx.Type(), CumulativeGasUsed: header.GasUsed}
-	if result.Failed() {
-		receipt.Status = types.ReceiptStatusFailed
-	} else {
-		receipt.Status = types.ReceiptStatusSuccessful
-	}
-	receipt.TxHash = tx.Hash()
-	receipt.GasUsed = result.UsedGas
-
-	// If the transaction created a contract, store the creation address in the receipt.
-	if msg.To() == nil {
-		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext().Origin, tx.GetNonce())
-	}
-
-	// Set the receipt logs and create the bloom filter.
-	receipt.Logs = ibs.GetLogs(tx.Hash())
-	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
-	receipt.BlockHash = header.Hash()
-	receipt.BlockNumber = header.Number
-	receipt.TransactionIndex = uint(ibs.TxIndex())
-
-	txResult := &searcher.BundleTxResult{
-		TxHash:       tx.Hash(),
-		GasUsed:      receipt.GasUsed,
-		ReturnData:   result.ReturnData,
-		Logs:         receipt.Logs,
-		CoinbaseDiff: new(uint256.Int).Sub(ibs.GetBalance(header.Coinbase), coinbaseBalanceBeforeTx).ToBig(),
-		CallMsg: &searcher.CallMsg{
-			From:       msg.From(),
-			To:         msg.To(),
-			Gas:        tx.GetGas(),
-			GasPrice:   tx.GetFeeCap().ToBig(),
-			GasFeeCap:  tx.GetFeeCap().ToBig(),
-			GasTipCap:  tx.GetTip().ToBig(),
-			Value:      tx.GetValue().ToBig(),
-			Nonce:      tx.GetNonce(),
-			Data:       tx.GetData(),
-			AccessList: tx.GetAccessList(),
-		},
-	}
-	if enableCallTracer {
-		traceResult, err := tracer.GetResult()
-		if err != nil {
-			return nil, fmt.Errorf("tx %s trace error: %w", tx.Hash(), err)
-		}
-		err = json.Unmarshal(traceResult, &txResult.CallFrame)
-		if err != nil {
-			return nil, fmt.Errorf("tx %s trace error: %w", tx.Hash(), err)
-		}
-	}
-	var baseFee *uint256.Int
-	if header.BaseFee != nil {
-		baseFee, _ = uint256.FromBig(header.BaseFee)
-	}
-	txResult.GasPrice = tx.GetEffectiveGasTip(baseFee).ToBig()
-	if err != nil {
-		return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
-	}
-	txResult.GasFees = new(big.Int).Mul(big.NewInt(int64(receipt.GasUsed)), txResult.GasPrice)
-	txResult.EthSentToCoinbase = new(big.Int).Sub(txResult.CoinbaseDiff, txResult.GasFees)
-	txResult.GasPrice = new(big.Int).Div(txResult.CoinbaseDiff, big.NewInt(int64(receipt.GasUsed)))
-
-	if result.Err != nil {
-		txResult.Error = result.Err.Error()
-	}
-	reason, errUnpack := abi.UnpackRevert(result.Revert())
-	if errUnpack == nil {
-		txResult.Error = fmt.Sprintf("execution reverted: %v", reason)
-	}
-	return txResult, err
-}
-
 func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*searcher.CallResult, error) {
 	if len(args.Txs) == 0 {
 		return nil, errors.New("missing txs")
@@ -337,6 +95,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 	if args.StateBlockNumberOrHash == (rpc.BlockNumberOrHash{}) {
 		args.StateBlockNumberOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
 	}
+
 	timeoutMS := int64(5000)
 	if args.Timeout != nil {
 		timeoutMS = *args.Timeout
@@ -364,11 +123,11 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 	if err != nil {
 		return nil, fmt.Errorf("create state reader: %v", err)
 	}
-	ibs := state.New(stateReader)
+	db := state.New(stateReader)
 
 	// override state
 	if args.StateOverrides != nil {
-		err = args.StateOverrides.Apply(ibs)
+		err = args.StateOverrides.Apply(db)
 		if err != nil {
 			return nil, fmt.Errorf("override state: %v", err)
 		}
@@ -434,7 +193,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		rand.Read(txHash[:])
 
 		// New random hash since its a call
-		ibs.SetTxContext(txHash, blockHash, i)
+		db.SetTxContext(txHash, blockHash, i)
 
 		// Convert tx args to msg to apply state transition
 		var gasPtr *hexutil.Uint64
@@ -449,6 +208,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 			MaxFeePerGas:         (*hexutil.Big)(callMsg.GasFeeCap),
 			MaxPriorityFeePerGas: (*hexutil.Big)(callMsg.GasTipCap),
 			Value:                (*hexutil.Big)(callMsg.Value),
+			Nonce:                (*hexutil.Uint64)(callMsg.Nonce),
 			Data:                 &callMsg.Data,
 			AccessList:           &callMsg.AccessList,
 		}
@@ -461,16 +221,28 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		vmConfig := vm.Config{
 			NoBaseFee: !args.EnableBaseFee,
 		}
-		var tracer tracers.Tracer
-		if args.EnableCallTracer {
-			tracer, err = tracers.New("callTracer", nil, json.RawMessage(`{"withLog":true}`))
-			if err != nil {
-				return nil, err
+		var tracer *searcher.CombinedTracer
+		if args.EnableCallTracer || callMsg.EnableAccessList {
+			cfg := searcher.CombinedTracerConfig{
+				WithCall:       args.EnableCallTracer,
+				WithLog:        args.EnableCallTracer,
+				WithAccessList: callMsg.EnableAccessList,
 			}
-			vmConfig.Tracer = tracer
+			if cfg.WithAccessList {
+				cfg.AccessList = msg.AccessList()
+				cfg.From = msg.From()
+				if msg.To() != nil {
+					cfg.To = *msg.To()
+				} else {
+					cfg.To = crypto.CreateAddress(msg.From(), msg.Nonce())
+				}
+				cfg.PreCompiles = vm.ActivePrecompiles(rules)
+			}
+			tracer = searcher.NewCombinedTracer(cfg)
 			vmConfig.Debug = true
+			vmConfig.Tracer = tracer
 		}
-		evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), ibs, chainConfig, vmConfig)
+		evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), db, chainConfig, vmConfig)
 
 		// Apply state transition
 		txResult := new(searcher.TxResult)
@@ -478,23 +250,18 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 
 		// Modifications are committed to the state
 		// Only delete empty objects if EIP158/161 (a.k.a Spurious Dragon) is in effect
-		_ = ibs.FinalizeTx(rules, state.NewNoopWriter())
+		_ = db.FinalizeTx(rules, state.NewNoopWriter())
 
 		if err != nil {
 			txResult.Error = fmt.Sprintf("%s (supplied gas %d)", err.Error(), msg.Gas())
 		} else {
-			txResult.Logs = ibs.GetLogs(txHash)
+			txResult.Logs = db.GetLogs(txHash)
 			if args.EnableCallTracer {
-				traceResult, err := tracer.GetResult()
-				if err != nil {
-					return nil, err
-				}
-				err = json.Unmarshal(traceResult, &txResult.CallFrame)
-				if err != nil {
-					return nil, err
-				}
+				txResult.CallFrame = tracer.CallFrame()
 			}
-
+			if callMsg.EnableAccessList {
+				txResult.AccessList = tracer.AccessList()
+			}
 			if result.Err != nil {
 				txResult.Error = result.Err.Error()
 			}
@@ -512,4 +279,254 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 	}
 
 	return ret, nil
+}
+
+func (api *APIImpl) SearcherCallBundle(ctx context.Context, args *searcher.CallBundleArgs) (*searcher.CallBundleResult, error) {
+	if args == nil {
+		return nil, errors.New("bundle missing args")
+	}
+	if len(args.Txs) == 0 {
+		return nil, errors.New("missing txs")
+	}
+	if args.StateBlockNumberOrHash == (rpc.BlockNumberOrHash{}) {
+		args.StateBlockNumberOrHash = rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	}
+
+	timeoutMS := int64(5000)
+	if args.Timeout != nil {
+		timeoutMS = *args.Timeout
+	}
+	timeout := time.Millisecond * time.Duration(timeoutMS)
+
+	var txs types.Transactions
+	for _, encodedTx := range args.Txs {
+		tx, err := types.DecodeWrappedTransaction(encodedTx)
+		if err != nil {
+			return nil, err
+		}
+		txs = append(txs, tx)
+	}
+
+	dbtx, err := api.db.BeginRo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create ro transaction: %v", err)
+	}
+	defer dbtx.Rollback()
+
+	chainConfig, err := api.chainConfig(dbtx)
+	if err != nil {
+		return nil, fmt.Errorf("read chain config: %v", err)
+	}
+	engine := api.engine()
+
+	blockNumber, hash, _, err := rpchelper.GetBlockNumber(args.StateBlockNumberOrHash, dbtx, api.filters)
+	if err != nil {
+		return nil, err
+	}
+
+	stateReader, err := rpchelper.CreateStateReader(ctx, dbtx, args.StateBlockNumberOrHash, 0, api.filters, api.stateCache, api.historyV3(dbtx), chainConfig.ChainName)
+	if err != nil {
+		return nil, fmt.Errorf("create state reader: %v", err)
+	}
+	db := state.New(stateReader)
+
+	// override state
+	if args.StateOverrides != nil {
+		err = args.StateOverrides.Apply(db)
+		if err != nil {
+			return nil, fmt.Errorf("override state: %v", err)
+		}
+	}
+
+	parent, err := api._blockReader.Header(context.Background(), dbtx, hash, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch header %d(%x): %v", blockNumber, hash, err)
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("block %d(%x) not found", blockNumber, hash)
+	}
+	header := &types.Header{
+		ParentHash: parent.Hash(),
+		Number:     new(big.Int).Set(parent.Number),
+		GasLimit:   parent.GasLimit,
+		Time:       parent.Time,
+		Difficulty: new(big.Int).Set(parent.Difficulty),
+		Coinbase:   parent.Coinbase,
+	}
+	if chainConfig.IsLondon(parent.Number.Uint64()) {
+		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
+	}
+
+	// header overrides
+	args.BlockOverrides.Apply(header)
+
+	// Gas pool
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+
+	blockContext := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
+	blockHash := parent.Hash()
+	rules := chainConfig.Rules(parent.Number.Uint64(), blockContext.Time)
+
+	bundleHash := sha3.NewLegacyKeccak256()
+	// Setup context so it may be cancelled when the call
+	// has completed or, in case of unmetered gas, setup
+	// a context with a timeout
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// This makes sure resources are cleaned up
+	defer cancel()
+
+	// Feed each of the transactions into the VM ctx
+	// And try and estimate the gas used
+	ret := &searcher.CallBundleResult{
+		CoinbaseDiff:      db.GetBalance(header.Coinbase).ToBig(),
+		GasFees:           new(big.Int),
+		EthSentToCoinbase: new(big.Int),
+		StateBlockNumber:  parent.Number.Int64(),
+		Txs:               make([]*searcher.BundleTxResult, 0, len(txs)),
+	}
+	for i, tx := range txs {
+		// Check if the context was cancelled (eg. timed-out)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		db.SetTxContext(tx.Hash(), blockHash, i)
+		txResult, err := api.applyTransactionWithResult(chainConfig, blockContext, rules, gp, db, header, tx, args)
+		if err != nil {
+			return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
+		}
+		bundleHash.Write(tx.Hash().Bytes())
+		ret.TotalGasUsed += txResult.GasUsed
+		ret.GasFees.Add(ret.GasFees, txResult.GasFees)
+		ret.Txs = append(ret.Txs, txResult)
+	}
+
+	ret.CoinbaseDiff = new(big.Int).Sub(db.GetBalance(header.Coinbase).ToBig(), ret.CoinbaseDiff)
+	ret.EthSentToCoinbase = new(big.Int).Sub(ret.CoinbaseDiff, ret.GasFees)
+	ret.BundleGasPrice = new(big.Int).Div(ret.CoinbaseDiff, big.NewInt(int64(ret.TotalGasUsed)))
+	ret.BundleHash = common.BytesToHash(bundleHash.Sum(nil))
+
+	return ret, nil
+}
+
+func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContext evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, db *state.IntraBlockState, header *types.Header, tx types.Transaction, args *searcher.CallBundleArgs) (*searcher.BundleTxResult, error) {
+	singer := types.MakeSigner(config, header.Number.Uint64(), header.Time)
+	msg, err := tx.AsMessage(*singer, header.BaseFee, rules)
+	if err != nil {
+		return nil, err
+	}
+	var tracer *searcher.CombinedTracer
+	var vmConfig vm.Config
+	if args.EnableCallTracer || args.EnableAccessList {
+		cfg := searcher.CombinedTracerConfig{
+			WithCall:       args.EnableCallTracer,
+			WithLog:        args.EnableCallTracer,
+			WithAccessList: args.EnableAccessList,
+		}
+		if cfg.WithAccessList {
+			cfg.AccessList = msg.AccessList()
+			cfg.From = msg.From()
+			if msg.To() != nil {
+				cfg.To = *msg.To()
+			} else {
+				cfg.To = crypto.CreateAddress(msg.From(), msg.Nonce())
+			}
+			cfg.PreCompiles = vm.ActivePrecompiles(rules)
+		}
+		tracer = searcher.NewCombinedTracer(cfg)
+		vmConfig.Debug = true
+		vmConfig.Tracer = tracer
+	}
+
+	// Create a new context to be used in the EVM environment
+	evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), db, config, vmConfig)
+
+	// Apply the transaction to the current state (included in the env).
+	coinbaseBalanceBeforeTx := db.GetBalance(header.Coinbase)
+	result, err := core.ApplyMessage(evm, msg, gp, true, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update the state with pending changes
+	if err = db.FinalizeTx(rules, state.NewNoopWriter()); err != nil {
+		return nil, err
+	}
+	header.GasUsed += result.UsedGas
+
+	// Create a new receipt for the transaction, storing the intermediate root and gas used
+	// by the tx.
+	receipt := &types.Receipt{Type: tx.Type(), CumulativeGasUsed: header.GasUsed}
+	if result.Failed() {
+		receipt.Status = types.ReceiptStatusFailed
+	} else {
+		receipt.Status = types.ReceiptStatusSuccessful
+	}
+	receipt.TxHash = tx.Hash()
+	receipt.GasUsed = result.UsedGas
+
+	// If the transaction created a contract, store the creation address in the receipt.
+	if msg.To() == nil {
+		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext().Origin, tx.GetNonce())
+	}
+
+	// Set the receipt logs and create the bloom filter.
+	receipt.Logs = db.GetLogs(tx.Hash())
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+	receipt.BlockHash = header.Hash()
+	receipt.BlockNumber = header.Number
+	receipt.TransactionIndex = uint(db.TxIndex())
+
+	nonce := msg.Nonce()
+	txResult := &searcher.BundleTxResult{
+		TxHash:       tx.Hash(),
+		GasUsed:      receipt.GasUsed,
+		ReturnData:   result.ReturnData,
+		Logs:         receipt.Logs,
+		CoinbaseDiff: new(uint256.Int).Sub(db.GetBalance(header.Coinbase), coinbaseBalanceBeforeTx).ToBig(),
+		CallMsg: &searcher.CallMsg{
+			From:       msg.From(),
+			To:         msg.To(),
+			Gas:        tx.GetGas(),
+			GasPrice:   tx.GetFeeCap().ToBig(),
+			GasFeeCap:  tx.GetFeeCap().ToBig(),
+			GasTipCap:  tx.GetTip().ToBig(),
+			Value:      tx.GetValue().ToBig(),
+			Nonce:      &nonce,
+			Data:       tx.GetData(),
+			AccessList: tx.GetAccessList(),
+		},
+	}
+	if args.EnableCallTracer {
+		txResult.CallFrame = tracer.CallFrame()
+	}
+	if args.EnableAccessList {
+		txResult.AccessList = tracer.AccessList()
+	}
+	var baseFee *uint256.Int
+	if header.BaseFee != nil {
+		baseFee, _ = uint256.FromBig(header.BaseFee)
+	}
+	txResult.GasPrice = tx.GetEffectiveGasTip(baseFee).ToBig()
+	if err != nil {
+		return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
+	}
+	txResult.GasFees = new(big.Int).Mul(big.NewInt(int64(receipt.GasUsed)), txResult.GasPrice)
+	txResult.EthSentToCoinbase = new(big.Int).Sub(txResult.CoinbaseDiff, txResult.GasFees)
+	txResult.GasPrice = new(big.Int).Div(txResult.CoinbaseDiff, big.NewInt(int64(receipt.GasUsed)))
+
+	if result.Err != nil {
+		txResult.Error = result.Err.Error()
+	}
+	reason, errUnpack := abi.UnpackRevert(result.Revert())
+	if errUnpack == nil {
+		txResult.Error = fmt.Sprintf("execution reverted: %v", reason)
+	}
+	return txResult, err
 }

@@ -147,7 +147,6 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		Time:       parent.Time,
 		Difficulty: new(big.Int).Set(parent.Difficulty),
 		Coinbase:   parent.Coinbase,
-		BaseFee:    new(big.Int).Set(parent.BaseFee),
 	}
 	if chainConfig.IsLondon(parent.Number.Uint64()) {
 		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
@@ -281,10 +280,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 	return ret, nil
 }
 
-func (api *APIImpl) SearcherCallBundle(ctx context.Context, args *searcher.CallBundleArgs) (*searcher.CallBundleResult, error) {
-	if args == nil {
-		return nil, errors.New("bundle missing args")
-	}
+func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBundleArgs) (*searcher.CallBundleResult, error) {
 	if len(args.Txs) == 0 {
 		return nil, errors.New("missing txs")
 	}
@@ -415,7 +411,7 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args *searcher.CallB
 	return ret, nil
 }
 
-func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContext evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, db *state.IntraBlockState, header *types.Header, tx types.Transaction, args *searcher.CallBundleArgs) (*searcher.BundleTxResult, error) {
+func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContext evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, db *state.IntraBlockState, header *types.Header, tx types.Transaction, args searcher.CallBundleArgs) (*searcher.BundleTxResult, error) {
 	singer := types.MakeSigner(config, header.Number.Uint64(), header.Time)
 	msg, err := tx.AsMessage(*singer, header.BaseFee, rules)
 	if err != nil {

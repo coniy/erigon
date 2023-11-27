@@ -228,7 +228,6 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 				WithAccessList: callMsg.EnableAccessList,
 			}
 			if cfg.WithAccessList {
-				cfg.AccessList = msg.AccessList()
 				cfg.From = msg.From()
 				if msg.To() != nil {
 					cfg.To = *msg.To()
@@ -426,7 +425,6 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 			WithAccessList: args.EnableAccessList,
 		}
 		if cfg.WithAccessList {
-			cfg.AccessList = msg.AccessList()
 			cfg.From = msg.From()
 			if msg.To() != nil {
 				cfg.To = *msg.To()

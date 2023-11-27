@@ -92,7 +92,6 @@ type CombinedTracerConfig struct {
 	WithCall       bool
 	WithLog        bool
 	WithAccessList bool
-	AccessList     types.AccessList
 	From           common.Address
 	To             common.Address
 	PreCompiles    []common.Address
@@ -116,14 +115,6 @@ func NewCombinedTracer(config CombinedTracerConfig) *CombinedTracer {
 			tracer.excl[addr] = struct{}{}
 		}
 		tracer.list = newAccessList()
-		for _, al := range config.AccessList {
-			if _, ok := tracer.excl[al.Address]; !ok {
-				tracer.list.addAddress(al.Address)
-			}
-			for _, slot := range al.StorageKeys {
-				tracer.list.addSlot(al.Address, slot)
-			}
-		}
 	}
 	return tracer
 }

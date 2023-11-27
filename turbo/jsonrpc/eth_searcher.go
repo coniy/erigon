@@ -215,6 +215,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		if err != nil {
 			return nil, err
 		}
+		msg.SetCheckNonce(callMsg.Nonce != nil)
 
 		// Create a new EVM environment
 		vmConfig := vm.Config{

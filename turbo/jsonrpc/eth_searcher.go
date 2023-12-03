@@ -229,13 +229,17 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 				WithAccessList: callMsg.EnableAccessList,
 			}
 			if cfg.WithAccessList {
-				cfg.From = msg.From()
+				cfg.AccessListExcludes = make(map[common.Address]struct{})
+				cfg.AccessListExcludes[msg.From()] = struct{}{}
 				if msg.To() != nil {
-					cfg.To = *msg.To()
+					cfg.AccessListExcludes[*msg.To()] = struct{}{}
 				} else {
-					cfg.To = crypto.CreateAddress(msg.From(), msg.Nonce())
+					cfg.AccessListExcludes[crypto.CreateAddress(msg.From(), msg.Nonce())] = struct{}{}
 				}
-				cfg.PreCompiles = vm.ActivePrecompiles(rules)
+				for _, precompile := range vm.ActivePrecompiles(rules) {
+					cfg.AccessListExcludes[precompile] = struct{}{}
+				}
+				cfg.AccessListExcludes[header.Coinbase] = struct{}{}
 			}
 			tracer = searcher.NewCombinedTracer(cfg)
 			vmConfig.Debug = true
@@ -426,13 +430,17 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 			WithAccessList: args.EnableAccessList,
 		}
 		if cfg.WithAccessList {
-			cfg.From = msg.From()
+			cfg.AccessListExcludes = make(map[common.Address]struct{})
+			cfg.AccessListExcludes[msg.From()] = struct{}{}
 			if msg.To() != nil {
-				cfg.To = *msg.To()
+				cfg.AccessListExcludes[*msg.To()] = struct{}{}
 			} else {
-				cfg.To = crypto.CreateAddress(msg.From(), msg.Nonce())
+				cfg.AccessListExcludes[crypto.CreateAddress(msg.From(), msg.Nonce())] = struct{}{}
 			}
-			cfg.PreCompiles = vm.ActivePrecompiles(rules)
+			for _, precompile := range vm.ActivePrecompiles(rules) {
+				cfg.AccessListExcludes[precompile] = struct{}{}
+			}
+			cfg.AccessListExcludes[header.Coinbase] = struct{}{}
 		}
 		tracer = searcher.NewCombinedTracer(cfg)
 		vmConfig.Debug = true

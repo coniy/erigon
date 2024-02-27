@@ -8,8 +8,8 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/erigon-lib/chain"
 	"github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon/accounts/abi"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/consensus/misc"
 	"github.com/ledgerwatch/erigon/core"
@@ -221,9 +221,9 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		vmConfig := vm.Config{
 			NoBaseFee: !args.EnableBaseFee,
 		}
-		var tracer *searcher.CombinedTracer
+		var tracer *searcher.Tracer
 		if args.EnableCallTracer || callMsg.EnableAccessList {
-			cfg := searcher.CombinedTracerConfig{
+			cfg := searcher.TracerConfig{
 				WithCall:       args.EnableCallTracer,
 				WithLog:        args.EnableCallTracer,
 				WithAccessList: callMsg.EnableAccessList,
@@ -421,10 +421,10 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 	if err != nil {
 		return nil, err
 	}
-	var tracer *searcher.CombinedTracer
+	var tracer *searcher.Tracer
 	var vmConfig vm.Config
 	if args.EnableCallTracer || args.EnableAccessList {
-		cfg := searcher.CombinedTracerConfig{
+		cfg := searcher.TracerConfig{
 			WithCall:       args.EnableCallTracer,
 			WithLog:        args.EnableCallTracer,
 			WithAccessList: args.EnableAccessList,
@@ -476,7 +476,7 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 
 	// If the transaction created a contract, store the creation address in the receipt.
 	if msg.To() == nil {
-		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext().Origin, tx.GetNonce())
+		receipt.ContractAddress = crypto.CreateAddress(evm.Origin, tx.GetNonce())
 	}
 
 	// Set the receipt logs and create the bloom filter.

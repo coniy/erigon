@@ -6,7 +6,6 @@ import (
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	types2 "github.com/ledgerwatch/erigon-lib/types"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/rpc"
@@ -210,9 +209,9 @@ type CallFrame struct {
 	Type         CallType         `json:"type,omitempty"`
 	From         common.Address   `json:"from,omitempty"`
 	To           common.Address   `json:"to,omitempty"`
-	Value        *hexutil.Big     `json:"value,omitempty"`
-	Gas          hexutil.Uint64   `json:"gas,omitempty"`
-	GasUsed      hexutil.Uint64   `json:"gasUsed,omitempty"`
+	Value        *big.Int         `json:"value,omitempty"`
+	Gas          uint64           `json:"gas,omitempty"`
+	GasUsed      uint64           `json:"gasUsed,omitempty"`
 	Error        string           `json:"error,omitempty"`
 	RevertReason string           `json:"revertReason,omitempty"`
 	Input        hexutility.Bytes `json:"input,omitempty"`

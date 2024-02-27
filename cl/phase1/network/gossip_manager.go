@@ -2,9 +2,16 @@ package network
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
+	"github.com/c2h5oh/datasize"
+	"github.com/ledgerwatch/erigon-lib/common"
+
+	"github.com/ledgerwatch/erigon/cl/beacon/beaconevents"
 	"github.com/ledgerwatch/erigon/cl/freezer"
+	"github.com/ledgerwatch/erigon/cl/gossip"
+	"github.com/ledgerwatch/erigon/cl/persistence"
 	"github.com/ledgerwatch/erigon/cl/phase1/forkchoice"
 	"github.com/ledgerwatch/erigon/cl/sentinel/peers"
 
@@ -13,7 +20,6 @@ import (
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/cltypes"
 	"github.com/ledgerwatch/erigon/cl/utils"
-	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/log/v3"
 )
 
@@ -26,43 +32,49 @@ type GossipManager struct {
 	beaconConfig  *clparams.BeaconChainConfig
 	genesisConfig *clparams.GenesisConfig
 
-	mu        sync.RWMutex
-	subs      map[int]chan *peers.PeeredObject[*cltypes.SignedBeaconBlock]
-	totalSubs int
+	emitters     *beaconevents.Emitters
+	mu           sync.RWMutex
+	gossipSource *persistence.GossipSource
 }
 
 func NewGossipReceiver(s sentinel.SentinelClient, forkChoice *forkchoice.ForkChoiceStore,
-	beaconConfig *clparams.BeaconChainConfig, genesisConfig *clparams.GenesisConfig, recorder freezer.Freezer) *GossipManager {
+	beaconConfig *clparams.BeaconChainConfig, genesisConfig *clparams.GenesisConfig, recorder freezer.Freezer, emitters *beaconevents.Emitters, gossipSource *persistence.GossipSource) *GossipManager {
 	return &GossipManager{
 		sentinel:      s,
 		forkChoice:    forkChoice,
+		emitters:      emitters,
 		beaconConfig:  beaconConfig,
 		genesisConfig: genesisConfig,
 		recorder:      recorder,
-		subs:          make(map[int]chan *peers.PeeredObject[*cltypes.SignedBeaconBlock]),
+		gossipSource:  gossipSource,
 	}
 }
 
-// this subscribes to signed beacon blocks..... i wish this was better
-func (g *GossipManager) SubscribeSignedBeaconBlocks(ctx context.Context) <-chan *peers.PeeredObject[*cltypes.SignedBeaconBlock] {
-	// a really big limit because why not....
-	out := make(chan *peers.PeeredObject[*cltypes.SignedBeaconBlock], 512)
-	g.mu.Lock()
-	g.totalSubs++
-	idx := g.totalSubs
-	g.subs[idx] = out
-	g.mu.Unlock()
-	go func() {
-		<-ctx.Done()
-		g.mu.Lock()
-		delete(g.subs, idx)
-		g.mu.Unlock()
-	}()
-	return out
-
+func operationsContract[T ssz.EncodableSSZ](ctx context.Context, g *GossipManager, l log.Ctx, data *sentinel.GossipData, version int, name string, fn func(T, bool) error) error {
+	var t T
+	object := t.Clone().(T)
+	if err := object.DecodeSSZ(common.CopyBytes(data.Data), version); err != nil {
+		g.sentinel.BanPeer(ctx, data.Peer)
+		l["at"] = fmt.Sprintf("decoding %s", name)
+		return err
+	}
+	if err := fn(object /*test=*/, false); err != nil {
+		l["at"] = fmt.Sprintf("verify %s", name)
+		return err
+	}
+	if _, err := g.sentinel.PublishGossip(ctx, data); err != nil {
+		log.Debug("failed publish gossip", "err", err)
+	}
+	return nil
 }
 
-func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l log.Ctx) error {
+func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l log.Ctx) (err error) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
 
 	currentEpoch := utils.GetCurrentEpoch(g.genesisConfig.GenesisTime, g.beaconConfig.SecondsPerSlot, g.beaconConfig.SlotsPerEpoch)
 	version := g.beaconConfig.GetCurrentStateVersion(currentEpoch)
@@ -72,8 +84,8 @@ func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l
 	// If the deserialization fails, an error is logged and the loop returns to the next iteration.
 	// If the deserialization is successful, the object is set to the deserialized value and the loop returns to the next iteration.
 	var object ssz.Unmarshaler
-	switch data.Type {
-	case sentinel.GossipType_BeaconBlockGossipType:
+	switch data.Name {
+	case gossip.TopicNameBeaconBlock:
 		object = cltypes.NewSignedBeaconBlock(g.beaconConfig)
 		if err := object.DecodeSSZ(common.CopyBytes(data.Data), int(version)); err != nil {
 			g.sentinel.BanPeer(ctx, data.Peer)
@@ -101,79 +113,116 @@ func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l
 		}
 
 		log.Debug("Received block via gossip",
-			"peers", count.Amount,
+			"peers", count.Active,
 			"slot", block.Block.Slot,
 		)
-
-		if err := freezer.PutObjectSSZIntoFreezer("signedBeaconBlock", "caplin_core", block.Block.Slot, block, g.recorder); err != nil {
+		g.gossipSource.InsertBlock(ctx, &peers.PeeredObject[*cltypes.SignedBeaconBlock]{Data: block, Peer: data.Peer.Pid})
+	case gossip.TopicNameLightClientFinalityUpdate:
+		obj := &cltypes.LightClientFinalityUpdate{}
+		if err := obj.DecodeSSZ(common.CopyBytes(data.Data), int(version)); err != nil {
+			g.sentinel.BanPeer(ctx, data.Peer)
+			l["at"] = "decoding lc finality update"
 			return err
 		}
-
-		g.mu.RLock()
-		for _, v := range g.subs {
-			select {
-			case v <- &peers.PeeredObject[*cltypes.SignedBeaconBlock]{Data: block, Peer: data.Peer.Pid}:
-			default:
+	case gossip.TopicNameLightClientOptimisticUpdate:
+		obj := &cltypes.LightClientOptimisticUpdate{}
+		if err := obj.DecodeSSZ(common.CopyBytes(data.Data), int(version)); err != nil {
+			g.sentinel.BanPeer(ctx, data.Peer)
+			l["at"] = "decoding lc optimistic update"
+			return err
+		}
+	case gossip.TopicNameSyncCommitteeContributionAndProof:
+		if err := operationsContract[*cltypes.SignedContributionAndProof](ctx, g, l, data, int(version), "contribution and proof", g.forkChoice.OnSignedContributionAndProof); err != nil {
+			return err
+		}
+	case gossip.TopicNameVoluntaryExit:
+		if err := operationsContract[*cltypes.SignedVoluntaryExit](ctx, g, l, data, int(version), "voluntary exit", g.forkChoice.OnVoluntaryExit); err != nil {
+			return err
+		}
+	case gossip.TopicNameProposerSlashing:
+		if err := operationsContract[*cltypes.ProposerSlashing](ctx, g, l, data, int(version), "proposer slashing", g.forkChoice.OnProposerSlashing); err != nil {
+			return err
+		}
+	case gossip.TopicNameAttesterSlashing:
+		if err := operationsContract[*cltypes.AttesterSlashing](ctx, g, l, data, int(version), "attester slashing", g.forkChoice.OnAttesterSlashing); err != nil {
+			return err
+		}
+	case gossip.TopicNameBlsToExecutionChange:
+		if err := operationsContract[*cltypes.SignedBLSToExecutionChange](ctx, g, l, data, int(version), "bls to execution change", g.forkChoice.OnBlsToExecutionChange); err != nil {
+			return err
+		}
+	case gossip.TopicNameBeaconAggregateAndProof:
+		return nil
+	// if err := operationsContract[*cltypes.SignedAggregateAndProof](ctx, g, l, data, int(version), "aggregate and proof", g.forkChoice.OnAggregateAndProof); err != nil {
+	// 	return err
+	// } Uncomment when fixed.
+	default:
+		switch {
+		case gossip.IsTopicBlobSidecar(data.Name):
+			// decode sidecar
+			blobSideCar := &cltypes.BlobSidecar{}
+			if err := blobSideCar.DecodeSSZ(common.CopyBytes(data.Data), int(version)); err != nil {
+				g.sentinel.BanPeer(ctx, data.Peer)
+				l["at"] = "decoding blob sidecar"
+				return err
 			}
-		}
-		g.mu.RUnlock()
-
-	case sentinel.GossipType_VoluntaryExitGossipType:
-		object = &cltypes.SignedVoluntaryExit{}
-		if err := object.DecodeSSZ(data.Data, int(version)); err != nil {
-			g.sentinel.BanPeer(ctx, data.Peer)
-			l["at"] = "decode exit"
-			return err
-		}
-	case sentinel.GossipType_ProposerSlashingGossipType:
-		object = &cltypes.ProposerSlashing{}
-		if err := object.DecodeSSZ(data.Data, int(version)); err != nil {
-			l["at"] = "decode proposer slash"
-			g.sentinel.BanPeer(ctx, data.Peer)
-			return err
-		}
-	case sentinel.GossipType_AttesterSlashingGossipType:
-		object = &cltypes.AttesterSlashing{}
-		if err := object.DecodeSSZ(data.Data, int(version)); err != nil {
-			l["at"] = "decode attester slash"
-			g.sentinel.BanPeer(ctx, data.Peer)
-			return err
-		}
-		if err := g.forkChoice.OnAttesterSlashing(object.(*cltypes.AttesterSlashing)); err != nil {
-			l["at"] = "on attester slash"
-			return err
-		}
-	case sentinel.GossipType_AggregateAndProofGossipType:
-		object = &cltypes.SignedAggregateAndProof{}
-		if err := object.DecodeSSZ(data.Data, int(version)); err != nil {
-			l["at"] = "decoding proof"
-			g.sentinel.BanPeer(ctx, data.Peer)
-			return err
+			log.Debug("Received blob sidecar via gossip", "index", *data.SubnetId, "size", datasize.ByteSize(len(blobSideCar.Blob)))
+		default:
 		}
 	}
 	return nil
 }
 
 func (g *GossipManager) Start(ctx context.Context) {
-	subscription, err := g.sentinel.SubscribeGossip(ctx, &sentinel.EmptyMessage{})
+	subscription, err := g.sentinel.SubscribeGossip(ctx, &sentinel.SubscriptionData{})
 	if err != nil {
 		return
 	}
+	operationsCh := make(chan *sentinel.GossipData, 1<<16)
+	blocksCh := make(chan *sentinel.GossipData, 1<<16)
 
-	l := log.Ctx{}
+	// Start a goroutine that listens for new gossip messages and sends them to the operations processor.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case data := <-operationsCh:
+				l := log.Ctx{}
+				err = g.onRecv(ctx, data, l)
+				if err != nil {
+					log.Debug("[Beacon Gossip] Recoverable Error", "err", err)
+				}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case data := <-blocksCh:
+				l := log.Ctx{}
+				err = g.onRecv(ctx, data, l)
+				if err != nil {
+					log.Debug("[Beacon Gossip] Recoverable Error", "err", err)
+				}
+			}
+		}
+	}()
+
 	for {
 		data, err := subscription.Recv()
 		if err != nil {
 			log.Warn("[Beacon Gossip] Fatal error receiving gossip", "err", err)
 			break
 		}
-		for k := range l {
-			delete(l, k)
-		}
-		err = g.onRecv(ctx, data, l)
-		if err != nil {
-			l["err"] = err
-			log.Debug("[Beacon Gossip] Recoverable Error", l)
+
+		if data.Name == gossip.TopicNameBeaconBlock {
+			blocksCh <- data
+		} else {
+			operationsCh <- data
 		}
 	}
 }

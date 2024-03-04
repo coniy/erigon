@@ -1,12 +1,11 @@
 package handler
 
 import (
+	_ "embed"
 	"testing"
 
 	"github.com/ledgerwatch/erigon/cl/beacon/beacontest"
 	"github.com/ledgerwatch/erigon/cl/clparams"
-
-	_ "embed"
 )
 
 func TestHarnessPhase0(t *testing.T) {
@@ -44,6 +43,7 @@ func TestHarnessBellatrix(t *testing.T) {
 			beacontest.WithTestFromFs(Harnesses, "lightclient"),
 			beacontest.WithTestFromFs(Harnesses, "validators"),
 			beacontest.WithTestFromFs(Harnesses, "lighthouse"),
+			beacontest.WithTestFromFs(Harnesses, "blob_sidecars"),
 		)...,
 	)
 }

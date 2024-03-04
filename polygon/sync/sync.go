@@ -2,10 +2,12 @@ package sync
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon/core/types"
+	"github.com/ledgerwatch/erigon/polygon/heimdall"
 	"github.com/ledgerwatch/erigon/polygon/p2p"
 )
 
@@ -14,8 +16,10 @@ type Sync struct {
 	execution        ExecutionClient
 	verify           AccumulatedHeadersVerifier
 	p2pService       p2p.Service
-	downloader       *HeaderDownloader
-	ccBuilderFactory func(root *types.Header) CanonicalChainBuilder
+	downloader       HeaderDownloader
+	ccBuilderFactory func(root *types.Header, span *heimdall.Span) CanonicalChainBuilder
+	spansCache       *SpansCache
+	fetchLatestSpan  func(ctx context.Context) (*heimdall.Span, error)
 	events           chan Event
 	logger           log.Logger
 }
@@ -25,8 +29,10 @@ func NewSync(
 	execution ExecutionClient,
 	verify AccumulatedHeadersVerifier,
 	p2pService p2p.Service,
-	downloader *HeaderDownloader,
-	ccBuilderFactory func(root *types.Header) CanonicalChainBuilder,
+	downloader HeaderDownloader,
+	ccBuilderFactory func(root *types.Header, span *heimdall.Span) CanonicalChainBuilder,
+	spansCache *SpansCache,
+	fetchLatestSpan func(ctx context.Context) (*heimdall.Span, error),
 	events chan Event,
 	logger log.Logger,
 ) *Sync {
@@ -37,27 +43,18 @@ func NewSync(
 		p2pService:       p2pService,
 		downloader:       downloader,
 		ccBuilderFactory: ccBuilderFactory,
+		spansCache:       spansCache,
+		fetchLatestSpan:  fetchLatestSpan,
 		events:           events,
 		logger:           logger,
 	}
 }
 
-func (s *Sync) commitExecution(ctx context.Context, oldTip uint64) error {
-	newTip, err := s.storage.TipHeader(ctx)
-	if err != nil {
+func (s *Sync) commitExecution(ctx context.Context, newTip *types.Header) error {
+	if err := s.storage.Flush(ctx); err != nil {
 		return err
 	}
-	newTipNum := newTip.Number.Uint64()
-
-	newHeaders, err := s.storage.GetHeadersInRange(ctx, oldTip, newTipNum+1)
-	if err != nil {
-		return err
-	}
-
-	if err = s.execution.InsertBlocks(newHeaders); err != nil {
-		return err
-	}
-	return s.execution.UpdateForkChoice(newTip)
+	return s.execution.UpdateForkChoice(ctx, newTip)
 }
 
 func (s *Sync) onMilestoneEvent(
@@ -77,29 +74,32 @@ func (s *Sync) onMilestoneEvent(
 		}
 	}
 
-	s.logger.Debug("sync.Sync.onMilestoneEvent: local chain tip does not match the milestone, unwinding to the previous verified milestone", "err", err)
+	s.logger.Debug(
+		"sync.Sync.onMilestoneEvent: local chain tip does not match the milestone, unwinding to the previous verified milestone",
+		"err", err,
+	)
 
 	// the milestone doesn't correspond to the tip of the chain
 	// unwind to the previous verified milestone
 	oldTip := ccBuilder.Root()
 	oldTipNum := oldTip.Number.Uint64()
-	if err = s.execution.UpdateForkChoice(oldTip); err != nil {
+	if err = s.execution.UpdateForkChoice(ctx, oldTip); err != nil {
 		return err
 	}
 
-	if err = s.downloader.DownloadUsingMilestones(ctx, oldTipNum); err != nil {
-		return err
-	}
-
-	if err = s.commitExecution(ctx, oldTipNum); err != nil {
-		return err
-	}
-
-	root, err := s.storage.TipHeader(ctx)
+	newTip, err := s.downloader.DownloadUsingMilestones(ctx, oldTipNum)
 	if err != nil {
 		return err
 	}
-	ccBuilder.Reset(root)
+	if newTip == nil {
+		return errors.New("sync.Sync.onMilestoneEvent: unexpected to have no milestone headers since the last milestone after receiving a new milestone event")
+	}
+
+	if err = s.commitExecution(ctx, newTip); err != nil {
+		return err
+	}
+
+	ccBuilder.Reset(newTip)
 
 	return nil
 }
@@ -136,11 +136,11 @@ func (s *Sync) onNewHeaderEvent(
 	newTip := ccBuilder.Tip()
 
 	if newTip != oldTip {
-		if err = s.execution.InsertBlocks(newHeaders); err != nil {
+		if err = s.execution.InsertBlocks(ctx, newHeaders); err != nil {
 			return err
 		}
 
-		if err = s.execution.UpdateForkChoice(newTip); err != nil {
+		if err = s.execution.UpdateForkChoice(ctx, newTip); err != nil {
 			return err
 		}
 	}
@@ -149,32 +149,34 @@ func (s *Sync) onNewHeaderEvent(
 }
 
 func (s *Sync) Run(ctx context.Context) error {
-	oldTip, err := s.storage.TipBlockNumber(ctx)
+	tip, err := s.execution.CurrentHeader(ctx)
 	if err != nil {
 		return err
 	}
 
-	if err = s.downloader.DownloadUsingCheckpoints(ctx, oldTip); err != nil {
+	if newTip, err := s.downloader.DownloadUsingCheckpoints(ctx, tip.Number.Uint64()); err != nil {
+		return err
+	} else if newTip != nil {
+		tip = newTip
+	}
+
+	if newTip, err := s.downloader.DownloadUsingMilestones(ctx, tip.Number.Uint64()); err != nil {
+		return err
+	} else if newTip != nil {
+		tip = newTip
+	}
+
+	if err = s.commitExecution(ctx, tip); err != nil {
 		return err
 	}
 
-	newTip, err := s.storage.TipBlockNumber(ctx)
+	latestSpan, err := s.fetchLatestSpan(ctx)
 	if err != nil {
 		return err
 	}
-	if err = s.downloader.DownloadUsingMilestones(ctx, newTip); err != nil {
-		return err
-	}
+	s.spansCache.Add(latestSpan)
 
-	if err = s.commitExecution(ctx, oldTip); err != nil {
-		return err
-	}
-
-	root, err := s.storage.TipHeader(ctx)
-	if err != nil {
-		return err
-	}
-	ccBuilder := s.ccBuilderFactory(root)
+	ccBuilder := s.ccBuilderFactory(tip, latestSpan)
 
 	for {
 		select {
@@ -188,6 +190,8 @@ func (s *Sync) Run(ctx context.Context) error {
 				if err = s.onNewHeaderEvent(ctx, event, ccBuilder); err != nil {
 					return err
 				}
+			case EventTypeNewSpan:
+				s.spansCache.Add(event.NewSpan)
 			}
 		case <-ctx.Done():
 			return ctx.Err()

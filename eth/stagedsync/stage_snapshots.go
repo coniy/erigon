@@ -62,6 +62,7 @@ type SnapshotsCfg struct {
 
 	historyV3        bool
 	caplin           bool
+	blobs            bool
 	agg              *state.AggregatorV3
 	silkworm         *silkworm.Silkworm
 	snapshotUploader *snapshotUploader
@@ -79,6 +80,7 @@ func StageSnapshotsCfg(db kv.RwDB,
 	historyV3 bool,
 	agg *state.AggregatorV3,
 	caplin bool,
+	blobs bool,
 	silkworm *silkworm.Silkworm,
 ) SnapshotsCfg {
 	cfg := SnapshotsCfg{
@@ -94,6 +96,7 @@ func StageSnapshotsCfg(db kv.RwDB,
 		agg:                agg,
 		silkworm:           silkworm,
 		syncConfig:         syncConfig,
+		blobs:              blobs,
 	}
 
 	if uploadFs := cfg.syncConfig.UploadLocation; len(uploadFs) > 0 {
@@ -230,7 +233,7 @@ func DownloadAndIndexSnapshotsIfNeed(s *StageState, ctx context.Context, tx kv.R
 			cfg.notifier.Events.OnNewSnapshot()
 		}
 	} else {
-		if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.historyV3, cstate, cfg.agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, s.state.StagesIdsList()); err != nil {
+		if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.historyV3, cfg.blobs, cstate, cfg.agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, s.state.StagesIdsList()); err != nil {
 			return err
 		}
 	}
@@ -537,7 +540,7 @@ func (u *snapshotUploader) maxUploadedHeader() uint64 {
 						}
 					}
 				} else {
-					if info, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, state.file); ok {
+					if info, _, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, state.file); ok {
 						if info.Type.Enum() == snaptype.Enums.Headers {
 							if info.To > max {
 								max = info.To
@@ -602,7 +605,7 @@ func (e dirEntry) ModTime() time.Time {
 }
 
 func (e dirEntry) Sys() any {
-	if info, ok := snaptype.ParseFileName("", e.name); ok {
+	if info, _, ok := snaptype.ParseFileName("", e.name); ok {
 		return &snapInfo{info}
 	}
 
@@ -622,7 +625,7 @@ func (u *snapshotUploader) seedable(fi snaptype.FileInfo) bool {
 
 	if checkKnownSizes {
 		for _, it := range snapcfg.KnownCfg(u.cfg.chainConfig.ChainName).Preverified {
-			info, _ := snaptype.ParseFileName("", it.Name)
+			info, _, _ := snaptype.ParseFileName("", it.Name)
 
 			if fi.From == info.From {
 				return fi.To == info.To
@@ -747,9 +750,12 @@ func (u *snapshotUploader) updateRemotes(remoteFiles []fs.DirEntry) {
 			}
 
 		} else {
-			info, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, fi.Name())
-
+			info, isStateFile, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, fi.Name())
 			if !ok {
+				continue
+			}
+			if isStateFile {
+				//TODO
 				continue
 			}
 
@@ -1061,7 +1067,12 @@ func (u *snapshotUploader) upload(ctx context.Context, logger log.Logger) {
 
 		for _, f := range u.cfg.blockReader.FrozenFiles() {
 			if state, ok := u.files[f]; !ok {
-				if fi, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, f); ok {
+				if fi, isStateFile, ok := snaptype.ParseFileName(u.cfg.dirs.Snap, f); ok {
+					if isStateFile {
+						//TODO
+						continue
+					}
+
 					if u.seedable(fi) {
 						state := &uploadState{
 							file:  f,

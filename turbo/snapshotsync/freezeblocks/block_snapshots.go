@@ -255,6 +255,7 @@ type RoSnapshots struct {
 	indicesReady  atomic.Bool
 	segmentsReady atomic.Bool
 
+	types    []snaptype.Type
 	segments btree.Map[snaptype.Enum, *segments]
 
 	dir         string
@@ -283,7 +284,7 @@ func newRoSnapshots(cfg ethconfig.BlocksFreezing, snapDir string, types []snapty
 		segs.Set(snapType.Enum(), &segments{})
 	}
 
-	s := &RoSnapshots{dir: snapDir, cfg: cfg, segments: segs, logger: logger}
+	s := &RoSnapshots{dir: snapDir, cfg: cfg, segments: segs, logger: logger, types: types}
 	s.segmentsMin.Store(segmentsMin)
 
 	return s
@@ -320,15 +321,14 @@ func (s *RoSnapshots) EnsureExpectedBlocksAreAvailable(cfg *snapcfg.Cfg) error {
 	return nil
 }
 
-func (s *RoSnapshots) Types() []snaptype.Type {
-	types := make([]snaptype.Type, 0, s.segments.Len())
-
-	s.segments.Scan(func(segtype snaptype.Enum, value *segments) bool {
-		types = append(types, segtype.Type())
-		return true
-	})
-
-	return types
+func (s *RoSnapshots) Types() []snaptype.Type { return s.types }
+func (s *RoSnapshots) HasType(in snaptype.Type) bool {
+	for _, t := range s.types {
+		if t.Enum() == in.Enum() {
+			return true
+		}
+	}
+	return false
 }
 
 // DisableReadAhead - usage: `defer d.EnableReadAhead().DisableReadAhead()`. Please don't use this funcs without `defer` to avoid leak.
@@ -383,11 +383,12 @@ func (s *RoSnapshots) EnableMadvNormal() *RoSnapshots {
 }
 
 func (s *RoSnapshots) idxAvailability() uint64 {
-	max := make([]uint64, s.segments.Len())
-
+	max := make([]uint64, len(s.Types()))
 	i := 0
-
 	s.segments.Scan(func(segtype snaptype.Enum, value *segments) bool {
+		if !s.HasType(segtype.Type()) {
+			return true
+		}
 		for _, seg := range value.segments {
 			if !seg.IsIndexed() {
 				break
@@ -400,9 +401,8 @@ func (s *RoSnapshots) idxAvailability() uint64 {
 	})
 
 	var min uint64 = math.MaxUint64
-
-	for _, max := range max {
-		min = cmp.Min(min, max)
+	for _, maxEl := range max {
+		min = cmp.Min(min, maxEl)
 	}
 
 	return min
@@ -460,11 +460,17 @@ func (s *RoSnapshots) OpenFiles() (list []string) {
 
 // ReopenList stops on optimistic=false, continue opening files on optimistic=true
 func (s *RoSnapshots) ReopenList(fileNames []string, optimistic bool) error {
-	return s.rebuildSegments(fileNames, true, optimistic)
+	if err := s.rebuildSegments(fileNames, true, optimistic); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *RoSnapshots) InitSegments(fileNames []string) error {
-	return s.rebuildSegments(fileNames, false, true)
+	if err := s.rebuildSegments(fileNames, false, true); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *RoSnapshots) lockSegments() {
@@ -490,13 +496,16 @@ func (s *RoSnapshots) rebuildSegments(fileNames []string, open bool, optimistic 
 	var segmentsMaxSet bool
 
 	for _, fName := range fileNames {
-		f, ok := snaptype.ParseFileName(s.dir, fName)
+		f, _, ok := snaptype.ParseFileName(s.dir, fName)
 		if !ok {
 			continue
 		}
 
-		segtype, ok := s.segments.Get(f.Type.Enum())
+		if !s.HasType(f.Type) {
+			continue
+		}
 
+		segtype, ok := s.segments.Get(f.Type.Enum())
 		if !ok {
 			segtype = &segments{}
 			s.segments.Set(f.Type.Enum(), segtype)
@@ -977,16 +986,25 @@ func SegmentsCaplin(dir string, minBlock uint64) (res []snaptype.FileInfo, missi
 	}
 
 	{
-		var l []snaptype.FileInfo
+		var l, lSidecars []snaptype.FileInfo
 		var m []Range
 		for _, f := range list {
-			if f.Type.Enum() != snaptype.Enums.BeaconBlocks {
+			if f.Type.Enum() != snaptype.Enums.BeaconBlocks && f.Type.Enum() != snaptype.Enums.BlobSidecars {
+				continue
+			}
+			if f.Type.Enum() == snaptype.Enums.BlobSidecars {
+				lSidecars = append(lSidecars, f) // blobs are an exception
 				continue
 			}
 			l = append(l, f)
 		}
 		l, m = noGaps(noOverlaps(l), minBlock)
+		if len(m) > 0 {
+			lst := m[len(m)-1]
+			log.Debug("[snapshots] see gap", "type", snaptype.Enums.BeaconBlocks, "from", lst.from)
+		}
 		res = append(res, l...)
+		res = append(res, lSidecars...)
 		missingSnapshots = append(missingSnapshots, m...)
 	}
 	return res, missingSnapshots, nil
@@ -1018,6 +1036,10 @@ func typedSegments(dir string, minBlock uint64, types []snaptype.Type) (res []sn
 				l = append(l, f)
 			}
 			l, m = noGaps(noOverlaps(segmentsTypeCheck(dir, l)), minBlock)
+			if len(m) > 0 {
+				lst := m[len(m)-1]
+				log.Debug("[snapshots] see gap", "type", segType, "from", lst.from)
+			}
 			res = append(res, l...)
 			missingSnapshots = append(missingSnapshots, m...)
 		}
@@ -1841,8 +1863,11 @@ func TransactionsIdx(ctx context.Context, chainConfig *chain.Config, sn snaptype
 	}
 
 	txnHashIdx, err := recsplit.NewRecSplit(recsplit.RecSplitArgs{
-		KeyCount:   d.Count(),
-		Enums:      true,
+		KeyCount: d.Count(),
+
+		Enums:              true,
+		LessFalsePositives: true,
+
 		BucketSize: 2000,
 		LeafSize:   8,
 		TmpDir:     tmpDir,

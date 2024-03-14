@@ -215,6 +215,23 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		if err != nil {
 			return nil, err
 		}
+		if callMsg.Nonce != nil {
+			msg = types.NewMessage(
+				msg.From(),
+				msg.To(),
+				*callMsg.Nonce,
+				msg.Value(),
+				msg.Gas(),
+				msg.GasPrice(),
+				msg.FeeCap(),
+				msg.Tip(),
+				msg.Data(),
+				msg.AccessList(),
+				true,
+				false,
+				msg.MaxFeePerBlobGas(),
+			)
+		}
 		msg.SetCheckNonce(callMsg.Nonce != nil)
 
 		// Create a new EVM environment
@@ -234,7 +251,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 				if msg.To() != nil {
 					cfg.AccessListExcludes[*msg.To()] = struct{}{}
 				} else {
-					cfg.AccessListExcludes[crypto.CreateAddress(msg.From(), msg.Nonce())] = struct{}{}
+					cfg.AccessListExcludes[crypto.CreateAddress(msg.From(), db.GetNonce(msg.From()))] = struct{}{}
 				}
 				for _, precompile := range vm.ActivePrecompiles(rules) {
 					cfg.AccessListExcludes[precompile] = struct{}{}

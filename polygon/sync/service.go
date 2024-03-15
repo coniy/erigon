@@ -18,7 +18,7 @@ import (
 )
 
 type Service interface {
-	GetSync() *Sync
+	Run(ctx context.Context) error
 }
 
 type service struct {
@@ -26,6 +26,7 @@ type service struct {
 
 	p2pService p2p.Service
 	storage    Storage
+	events     *TipEvents
 }
 
 func NewService(
@@ -39,15 +40,17 @@ func NewService(
 ) Service {
 	execution := NewExecutionClient(engine)
 	storage := NewStorage(execution, maxPeers)
-	verify := VerifyAccumulatedHeaders
+	headersVerifier := VerifyAccumulatedHeaders
+	blocksVerifier := VerifyBlocks
 	p2pService := p2p.NewService(maxPeers, logger, sentryClient)
 	heimdallClient := heimdall.NewHeimdallClient(heimdallURL, logger)
 	heimdallService := heimdall.NewHeimdallNoStore(heimdallClient, logger)
-	downloader := NewHeaderDownloader(
+	blockDownloader := NewBlockDownloader(
 		logger,
 		p2pService,
 		heimdallService,
-		verify,
+		headersVerifier,
+		blocksVerifier,
 		storage,
 	)
 	spansCache := NewSpansCache()
@@ -71,13 +74,14 @@ func NewService(
 			headerValidator,
 			spansCache)
 	}
-	events := NewSyncToTipEvents()
+	events := NewTipEvents(p2pService, heimdallService)
 	sync := NewSync(
 		storage,
 		execution,
-		verify,
+		headersVerifier,
+		blocksVerifier,
 		p2pService,
-		downloader,
+		blockDownloader,
 		ccBuilderFactory,
 		spansCache,
 		heimdallService.FetchLatestSpan,
@@ -88,11 +92,8 @@ func NewService(
 		sync:       sync,
 		p2pService: p2pService,
 		storage:    storage,
+		events:     events,
 	}
-}
-
-func (s *service) GetSync() *Sync {
-	return s.sync
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -101,11 +102,28 @@ func (s *service) Run(ctx context.Context) error {
 
 	var serviceErr error
 
-	s.p2pService.Start(ctx)
-	defer s.p2pService.Stop()
+	go func() {
+		s.p2pService.Run(ctx)
+	}()
 
 	go func() {
 		err := s.storage.Run(ctx)
+		if (err != nil) && (ctx.Err() == nil) {
+			serviceErr = err
+			cancel()
+		}
+	}()
+
+	go func() {
+		err := s.events.Run(ctx)
+		if (err != nil) && (ctx.Err() == nil) {
+			serviceErr = err
+			cancel()
+		}
+	}()
+
+	go func() {
+		err := s.sync.Run(ctx)
 		if (err != nil) && (ctx.Err() == nil) {
 			serviceErr = err
 			cancel()
@@ -117,5 +135,6 @@ func (s *service) Run(ctx context.Context) error {
 	if serviceErr != nil {
 		return serviceErr
 	}
+
 	return ctx.Err()
 }

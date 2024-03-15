@@ -8,10 +8,13 @@ import (
 	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon/core/types"
-	"github.com/ledgerwatch/erigon/rlp"
 )
 
 func NewPenalizingFetcher(logger log.Logger, fetcher Fetcher, peerPenalizer PeerPenalizer) Fetcher {
+	return newPenalizingFetcher(logger, fetcher, peerPenalizer)
+}
+
+func newPenalizingFetcher(logger log.Logger, fetcher Fetcher, peerPenalizer PeerPenalizer) *penalizingFetcher {
 	return &penalizingFetcher{
 		Fetcher:       fetcher,
 		logger:        logger,
@@ -25,25 +28,40 @@ type penalizingFetcher struct {
 	peerPenalizer PeerPenalizer
 }
 
-func (pf *penalizingFetcher) FetchHeaders(ctx context.Context, start uint64, end uint64, peerId PeerId) ([]*types.Header, error) {
+func (pf *penalizingFetcher) FetchHeaders(ctx context.Context, start uint64, end uint64, peerId *PeerId) ([]*types.Header, error) {
 	headers, err := pf.Fetcher.FetchHeaders(ctx, start, end, peerId)
 	if err != nil {
-		shouldPenalize := rlp.IsInvalidRLPError(err) ||
-			errors.Is(err, &ErrIncorrectOriginHeader{}) ||
-			errors.Is(err, &ErrTooManyHeaders{}) ||
-			errors.Is(err, &ErrDisconnectedHeaders{})
-
-		if shouldPenalize {
-			pf.logger.Debug("penalizing peer", "peerId", peerId, "err", err.Error())
-
-			penalizeErr := pf.peerPenalizer.Penalize(ctx, peerId)
-			if penalizeErr != nil {
-				err = fmt.Errorf("%w: %w", penalizeErr, err)
-			}
-		}
-
-		return nil, err
+		return nil, pf.maybePenalize(ctx, peerId, err, &ErrTooManyHeaders{}, &ErrNonSequentialHeaderNumbers{})
 	}
 
 	return headers, nil
+}
+
+func (pf *penalizingFetcher) FetchBodies(ctx context.Context, headers []*types.Header, peerId *PeerId) ([]*types.Body, error) {
+	bodies, err := pf.Fetcher.FetchBodies(ctx, headers, peerId)
+	if err != nil {
+		return nil, pf.maybePenalize(ctx, peerId, err, &ErrTooManyBodies{}, ErrEmptyBody)
+	}
+
+	return bodies, nil
+}
+
+func (pf *penalizingFetcher) maybePenalize(ctx context.Context, peerId *PeerId, err error, penalizeErrs ...error) error {
+	var shouldPenalize bool
+	for _, penalizeErr := range penalizeErrs {
+		if errors.Is(err, penalizeErr) {
+			shouldPenalize = true
+			break
+		}
+	}
+
+	if shouldPenalize {
+		pf.logger.Debug("penalizing peer - penalize-able fetcher issue", "peerId", peerId, "err", err)
+
+		if penalizeErr := pf.peerPenalizer.Penalize(ctx, peerId); penalizeErr != nil {
+			err = fmt.Errorf("%w: %w", penalizeErr, err)
+		}
+	}
+
+	return err
 }

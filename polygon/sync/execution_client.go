@@ -8,8 +8,8 @@ import (
 )
 
 type ExecutionClient interface {
-	InsertBlocks(ctx context.Context, headers []*types.Header) error
-	UpdateForkChoice(ctx context.Context, tip *types.Header) error
+	InsertBlocks(ctx context.Context, blocks []*types.Block) error
+	UpdateForkChoice(ctx context.Context, tip *types.Header, finalizedHeader *types.Header) error
 	CurrentHeader(ctx context.Context) (*types.Header, error)
 }
 
@@ -21,16 +21,14 @@ func NewExecutionClient(engine execution_client.ExecutionEngine) ExecutionClient
 	return &executionClient{engine}
 }
 
-func (e *executionClient) InsertBlocks(ctx context.Context, headers []*types.Header) error {
-	//TODO implement me
-	panic("implement me")
+func (e *executionClient) InsertBlocks(ctx context.Context, blocks []*types.Block) error {
+	return e.engine.InsertBlocks(ctx, blocks, true)
 }
 
-func (e *executionClient) UpdateForkChoice(ctx context.Context, tip *types.Header) error {
-	//TODO implement me
-	panic("implement me")
+func (e *executionClient) UpdateForkChoice(ctx context.Context, tip *types.Header, finalizedHeader *types.Header) error {
+	return e.engine.ForkChoiceUpdate(ctx, finalizedHeader.Hash(), tip.Hash())
 }
 
 func (e *executionClient) CurrentHeader(ctx context.Context) (*types.Header, error) {
-	panic("implement me")
+	return e.engine.CurrentHeader(ctx)
 }

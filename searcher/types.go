@@ -8,6 +8,7 @@ import (
 	types2 "github.com/ledgerwatch/erigon-lib/types"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
+	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
 	"github.com/ledgerwatch/erigon/rpc"
 	"math/big"
 )
@@ -86,33 +87,36 @@ type BlockOverrides struct {
 }
 
 // Apply overrides the given header fields into the given block context.
-func (diff *BlockOverrides) Apply(header *types.Header) {
+func (diff *BlockOverrides) Apply(blockCtx *evmtypes.BlockContext) {
 	if diff == nil {
 		return
 	}
 	if diff.Number != nil {
-		header.Number = diff.Number
+		blockCtx.BlockNumber = uint64(diff.Number.Int64())
 	}
 	if diff.NumberShift != 0 {
-		header.Number.Add(header.Number, big.NewInt(diff.NumberShift))
+		blockCtx.BlockNumber = blockCtx.BlockNumber + uint64(diff.NumberShift)
 	}
 	if diff.Difficulty != nil {
-		header.Difficulty = diff.Difficulty
+		blockCtx.Difficulty = diff.Difficulty
 	}
 	if diff.Time != nil {
-		header.Time = *diff.Time
+		blockCtx.Time = *diff.Time
 	}
 	if diff.TimeShift != 0 {
-		header.Time += uint64(diff.TimeShift)
+		blockCtx.Time += uint64(diff.TimeShift)
 	}
 	if diff.GasLimit != nil {
-		header.GasLimit = *diff.GasLimit
+		blockCtx.GasLimit = *diff.GasLimit
 	}
 	if diff.Coinbase != nil {
-		header.Coinbase = *diff.Coinbase
+		blockCtx.Coinbase = *diff.Coinbase
+	}
+	if diff.Random != nil {
+		blockCtx.PrevRanDao = diff.Random
 	}
 	if diff.BaseFee != nil {
-		header.BaseFee = diff.BaseFee
+		blockCtx.BaseFee = uint256.MustFromBig(diff.BaseFee)
 	}
 }
 

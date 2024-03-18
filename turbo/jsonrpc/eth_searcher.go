@@ -141,25 +141,29 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 		return nil, fmt.Errorf("block %d(%x) not found", blockNumber, hash)
 	}
 	header := &types.Header{
-		ParentHash: parent.Hash(),
-		Number:     new(big.Int).Set(parent.Number),
-		GasLimit:   parent.GasLimit,
-		Time:       parent.Time,
-		Difficulty: new(big.Int).Set(parent.Difficulty),
-		Coinbase:   parent.Coinbase,
+		ParentHash:            parent.Hash(),
+		Coinbase:              parent.Coinbase,
+		Difficulty:            new(big.Int).Set(parent.Difficulty),
+		Number:                new(big.Int).Set(parent.Number),
+		GasLimit:              parent.GasLimit,
+		Time:                  parent.Time,
+		MixDigest:             parent.MixDigest,
+		ExcessBlobGas:         parent.ExcessBlobGas,
+		ParentBeaconBlockRoot: parent.ParentBeaconBlockRoot,
 	}
 	if chainConfig.IsLondon(parent.Number.Uint64()) {
 		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
 	}
-	// header overrides
-	args.BlockOverrides.Apply(header)
+	blockCtx := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
+
+	// block overrides
+	args.BlockOverrides.Apply(&blockCtx)
 
 	// Gas pool
 	gp := new(core.GasPool).AddGas(math.MaxUint64)
 
-	blockContext := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
 	blockHash := parent.Hash()
-	rules := chainConfig.Rules(parent.Number.Uint64(), blockContext.Time)
+	rules := chainConfig.Rules(parent.Number.Uint64(), blockCtx.Time)
 
 	// Setup context so it may be cancelled when the call
 	// has completed or, in case of unmetered gas, setup
@@ -211,7 +215,7 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 			Data:                 &callMsg.Data,
 			AccessList:           &callMsg.AccessList,
 		}
-		msg, err := txArgs.ToMessage(api.GasCap, blockContext.BaseFee)
+		msg, err := txArgs.ToMessage(api.GasCap, blockCtx.BaseFee)
 		if err != nil {
 			return nil, err
 		}
@@ -256,13 +260,13 @@ func (api *APIImpl) SearcherCall(ctx context.Context, args searcher.CallArgs) (*
 				for _, precompile := range vm.ActivePrecompiles(rules) {
 					cfg.AccessListExcludes[precompile] = struct{}{}
 				}
-				cfg.AccessListExcludes[header.Coinbase] = struct{}{}
+				cfg.AccessListExcludes[blockCtx.Coinbase] = struct{}{}
 			}
 			tracer = searcher.NewCombinedTracer(cfg)
 			vmConfig.Debug = true
 			vmConfig.Tracer = tracer
 		}
-		evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), db, chainConfig, vmConfig)
+		evm := vm.NewEVM(blockCtx, core.NewEVMTxContext(msg), db, chainConfig, vmConfig)
 
 		// Apply state transition
 		txResult := new(searcher.TxResult)
@@ -363,26 +367,29 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBu
 		return nil, fmt.Errorf("block %d(%x) not found", blockNumber, hash)
 	}
 	header := &types.Header{
-		ParentHash: parent.Hash(),
-		Number:     new(big.Int).Set(parent.Number),
-		GasLimit:   parent.GasLimit,
-		Time:       parent.Time,
-		Difficulty: new(big.Int).Set(parent.Difficulty),
-		Coinbase:   parent.Coinbase,
+		ParentHash:            parent.Hash(),
+		Coinbase:              parent.Coinbase,
+		Difficulty:            new(big.Int).Set(parent.Difficulty),
+		Number:                new(big.Int).Set(parent.Number),
+		GasLimit:              parent.GasLimit,
+		Time:                  parent.Time,
+		MixDigest:             parent.MixDigest,
+		ExcessBlobGas:         parent.ExcessBlobGas,
+		ParentBeaconBlockRoot: parent.ParentBeaconBlockRoot,
 	}
 	if chainConfig.IsLondon(parent.Number.Uint64()) {
 		header.BaseFee = misc.CalcBaseFee(chainConfig, parent)
 	}
+	blockCtx := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
 
-	// header overrides
-	args.BlockOverrides.Apply(header)
+	// block overrides
+	args.BlockOverrides.Apply(&blockCtx)
 
 	// Gas pool
 	gp := new(core.GasPool).AddGas(math.MaxUint64)
 
-	blockContext := transactions.NewEVMBlockContext(engine, header, args.StateBlockNumberOrHash.RequireCanonical, dbtx, api._blockReader)
 	blockHash := parent.Hash()
-	rules := chainConfig.Rules(parent.Number.Uint64(), blockContext.Time)
+	rules := chainConfig.Rules(parent.Number.Uint64(), blockCtx.Time)
 
 	bundleHash := sha3.NewLegacyKeccak256()
 	// Setup context so it may be cancelled when the call
@@ -401,7 +408,7 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBu
 	// Feed each of the transactions into the VM ctx
 	// And try and estimate the gas used
 	ret := &searcher.CallBundleResult{
-		CoinbaseDiff:      db.GetBalance(header.Coinbase).ToBig(),
+		CoinbaseDiff:      db.GetBalance(blockCtx.Coinbase).ToBig(),
 		GasFees:           new(big.Int),
 		EthSentToCoinbase: new(big.Int),
 		StateBlockNumber:  parent.Number.Int64(),
@@ -414,7 +421,7 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBu
 		}
 
 		db.SetTxContext(tx.Hash(), blockHash, i)
-		txResult, err := api.applyTransactionWithResult(chainConfig, blockContext, rules, gp, db, header, tx, args)
+		txResult, err := api.applyTransactionWithResult(chainConfig, blockCtx, rules, gp, db, tx, args)
 		if err != nil {
 			return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
 		}
@@ -424,7 +431,7 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBu
 		ret.Txs = append(ret.Txs, txResult)
 	}
 
-	ret.CoinbaseDiff = new(big.Int).Sub(db.GetBalance(header.Coinbase).ToBig(), ret.CoinbaseDiff)
+	ret.CoinbaseDiff = new(big.Int).Sub(db.GetBalance(blockCtx.Coinbase).ToBig(), ret.CoinbaseDiff)
 	ret.EthSentToCoinbase = new(big.Int).Sub(ret.CoinbaseDiff, ret.GasFees)
 	ret.BundleGasPrice = new(big.Int).Div(ret.CoinbaseDiff, big.NewInt(int64(ret.TotalGasUsed)))
 	ret.BundleHash = common.BytesToHash(bundleHash.Sum(nil))
@@ -432,9 +439,9 @@ func (api *APIImpl) SearcherCallBundle(ctx context.Context, args searcher.CallBu
 	return ret, nil
 }
 
-func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContext evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, db *state.IntraBlockState, header *types.Header, tx types.Transaction, args searcher.CallBundleArgs) (*searcher.BundleTxResult, error) {
-	singer := types.MakeSigner(config, header.Number.Uint64(), header.Time)
-	msg, err := tx.AsMessage(*singer, header.BaseFee, rules)
+func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockCtx evmtypes.BlockContext, rules *chain.Rules, gp *core.GasPool, db *state.IntraBlockState, tx types.Transaction, args searcher.CallBundleArgs) (*searcher.BundleTxResult, error) {
+	singer := types.MakeSigner(config, blockCtx.BlockNumber, blockCtx.Time)
+	msg, err := tx.AsMessage(*singer, blockCtx.BaseFee.ToBig(), rules)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +464,7 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 			for _, precompile := range vm.ActivePrecompiles(rules) {
 				cfg.AccessListExcludes[precompile] = struct{}{}
 			}
-			cfg.AccessListExcludes[header.Coinbase] = struct{}{}
+			cfg.AccessListExcludes[blockCtx.Coinbase] = struct{}{}
 		}
 		tracer = searcher.NewCombinedTracer(cfg)
 		vmConfig.Debug = true
@@ -465,10 +472,10 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 	}
 
 	// Create a new context to be used in the EVM environment
-	evm := vm.NewEVM(blockContext, core.NewEVMTxContext(msg), db, config, vmConfig)
+	evm := vm.NewEVM(blockCtx, core.NewEVMTxContext(msg), db, config, vmConfig)
 
 	// Apply the transaction to the current state (included in the env).
-	coinbaseBalanceBeforeTx := db.GetBalance(header.Coinbase)
+	coinbaseBalanceBeforeTx := db.GetBalance(blockCtx.Coinbase)
 	result, err := core.ApplyMessage(evm, msg, gp, true, false)
 	if err != nil {
 		return nil, err
@@ -478,38 +485,14 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 	if err = db.FinalizeTx(rules, state.NewNoopWriter()); err != nil {
 		return nil, err
 	}
-	header.GasUsed += result.UsedGas
-
-	// Create a new receipt for the transaction, storing the intermediate root and gas used
-	// by the tx.
-	receipt := &types.Receipt{Type: tx.Type(), CumulativeGasUsed: header.GasUsed}
-	if result.Failed() {
-		receipt.Status = types.ReceiptStatusFailed
-	} else {
-		receipt.Status = types.ReceiptStatusSuccessful
-	}
-	receipt.TxHash = tx.Hash()
-	receipt.GasUsed = result.UsedGas
-
-	// If the transaction created a contract, store the creation address in the receipt.
-	if msg.To() == nil {
-		receipt.ContractAddress = crypto.CreateAddress(evm.Origin, tx.GetNonce())
-	}
-
-	// Set the receipt logs and create the bloom filter.
-	receipt.Logs = db.GetLogs(tx.Hash())
-	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
-	receipt.BlockHash = header.Hash()
-	receipt.BlockNumber = header.Number
-	receipt.TransactionIndex = uint(db.TxIndex())
 
 	nonce := msg.Nonce()
 	txResult := &searcher.BundleTxResult{
 		TxHash:       tx.Hash(),
-		GasUsed:      receipt.GasUsed,
+		GasUsed:      result.UsedGas,
 		ReturnData:   result.ReturnData,
-		Logs:         receipt.Logs,
-		CoinbaseDiff: new(uint256.Int).Sub(db.GetBalance(header.Coinbase), coinbaseBalanceBeforeTx).ToBig(),
+		Logs:         db.GetLogs(tx.Hash()),
+		CoinbaseDiff: new(uint256.Int).Sub(db.GetBalance(blockCtx.Coinbase), coinbaseBalanceBeforeTx).ToBig(),
 		CallMsg: &searcher.CallMsg{
 			From:       msg.From(),
 			To:         msg.To(),
@@ -529,17 +512,10 @@ func (api *APIImpl) applyTransactionWithResult(config *chain.Config, blockContex
 	if args.EnableAccessList {
 		txResult.AccessList = tracer.AccessList()
 	}
-	var baseFee *uint256.Int
-	if header.BaseFee != nil {
-		baseFee, _ = uint256.FromBig(header.BaseFee)
-	}
-	txResult.GasPrice = tx.GetEffectiveGasTip(baseFee).ToBig()
-	if err != nil {
-		return nil, fmt.Errorf("tx %s error: %w", tx.Hash(), err)
-	}
-	txResult.GasFees = new(big.Int).Mul(big.NewInt(int64(receipt.GasUsed)), txResult.GasPrice)
+	txResult.GasPrice = tx.GetEffectiveGasTip(blockCtx.BaseFee).ToBig()
+	txResult.GasFees = new(big.Int).Mul(big.NewInt(int64(result.UsedGas)), txResult.GasPrice)
 	txResult.EthSentToCoinbase = new(big.Int).Sub(txResult.CoinbaseDiff, txResult.GasFees)
-	txResult.GasPrice = new(big.Int).Div(txResult.CoinbaseDiff, big.NewInt(int64(receipt.GasUsed)))
+	txResult.GasPrice = new(big.Int).Div(txResult.CoinbaseDiff, big.NewInt(int64(result.UsedGas)))
 
 	if result.Err != nil {
 		txResult.Error = result.Err.Error()
